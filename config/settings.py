@@ -12,3 +12,4 @@ class Setting(BaseSettings):
     min_youtube_views:int = 10000
     min_youtube_subscriber:int = 10000
     min_duration:int = 600
+    max_google_result:int = 20
