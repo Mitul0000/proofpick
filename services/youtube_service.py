@@ -1,19 +1,22 @@
 from yt_dlp import YoutubeDL
-from config import settings
+from config.settings import Setting
 from concurrent.futures import ThreadPoolExecutor
-from youtube_transcript_api import YouTubeTranscriptApi
+import youtube_transcript_api
 from groq import Groq
 import os
+import re
+
+setting = Setting()
 
 
-class YoutubeSearch:
+class YoutubeSearch: 
 
     def __init__(self,search_list:list[str]):
         self.search_string = search_list
 
     def search_youtube(self)->list[dict[str,str]]:
         
-        ydl_opts = {
+        ydl_opts = { 
         'quiet': True,
         'extract_flat': True,
         'skip_download': True
@@ -22,20 +25,23 @@ class YoutubeSearch:
         links = []
 
         for string in self.search_string:
-            search_url = f"ytsearch{settings.max_youtube_results}:{string}"
+            search_url = f"ytsearch{setting.max_youtube_results}:{string}"
+            
             with YoutubeDL (ydl_opts) as ydl:
                 result = ydl.extract_info(search_url,download=False)
+                print(f"Search result extracted from the string {string}")
                 for entry in result.get("entries",[]):
+                    
                     duration = entry.get("duration")
                     views = entry.get("view_count")
-                    channal_subscriber = ydl.extract_info(entry["channel_url"], download=False).get("channel_follower_count")
+                    # channal_subscriber = ydl.extract_info(entry["channel_url"], download=False).get("channel_follower_count")
 
                     if(
                         duration is None or 
-                        duration<600 or 
-                        channal_subscriber is None or
-                        channal_subscriber < 10000 or
-                        views is None or views < 10000):
+                        duration<setting.min_duration or 
+                        # channal_subscriber is None or
+                        # channal_subscriber < setting.min_youtube_subscriber or
+                        views is None or views < setting.min_youtube_views):
                         continue
 
                     
@@ -48,25 +54,25 @@ class YoutubeSearch:
                         "views":views,
                         "channal_name":entry.get("channel"),
                         "channel_link":entry.get("channel_url"),
-                        "channal_subscriber":channal_subscriber
+                        # "channal_subscriber":channal_subscriber
                     })
-                return links
+        return links
 
 
     def extract_transcript_by_youtube_api(self,url):
         try:
-            video_id = url.split("v=")(1)
-            ytt_api = YouTubeTranscriptApi()
+            video_id = re.search(r"v=([^&]+)", url).group(1)
+            ytt_api = youtube_transcript_api.YouTubeTranscriptApi()
             fetched_transcript = ytt_api.fetch(video_id)
             transcript_in_dict = fetched_transcript.to_raw_data()
             text = " ".join(item["text"] for item in transcript_in_dict)
 
-            if(text is None or len(text)<20):
-                self.extract_transcript_by_api_call(url)
+            if text is None or len(text)<20:
+                text=self.extract_transcript_by_api_call(url)
 
         except Exception as e:
-            print(f"An error occurred during conversion: {e}")
-            return None
+            print(f"Official API failed, falling back to Whisper... Details: {e}")
+            return self.extract_transcript_by_api_call(url)
 
         return text
 
@@ -77,14 +83,17 @@ class YoutubeSearch:
     def extract_transcript_by_api_call(self,url):
         try:
             mp3_file = self.download_and_convert_to_mp3(url)
-            client = Groq()
+            client = Groq(api_key=setting.groq_api_key)
 
             with open(mp3_file,"rb") as file:
-                transcription = client.audio.transcriptions.create(
+                transcription = client.audio.translations.create(
                     file=file,
-                    model="whisper-large-v3-turbo",
+                    model="whisper-large-v3",
                     response_format="verbose_json"
                 )
+
+            if os.path.exists(mp3_file):
+                os.remove(mp3_file)
 
             return transcription.text
         except Exception as e:
@@ -93,7 +102,7 @@ class YoutubeSearch:
 
 
 
-    def download_and_convert_to_mp3(url):
+    def download_and_convert_to_mp3(self,url):
 
         script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         audio_dir = os.path.join(script_dir, "audio")
@@ -139,3 +148,18 @@ class YoutubeSearch:
             link["transcript"] = transcript
 
         return links
+
+    
+
+# for testing only
+# if __name__ =='__main__':
+
+#     yt = YoutubeSearch(["iphone 16 review"])
+#     print("Extracting the link from youtube")
+#     links_extracted = yt.search_youtube()
+#     print(f"{len(links_extracted)} links extracted sucessfully ")
+#     video_details_with_transcription = yt.get_transcript(links_extracted)
+#     print(f"video details :- {video_details_with_transcription}")
+
+
+
