@@ -26,8 +26,11 @@ class WebExtractor:
 
     
 
-    def webcontent_filter(self):
-        pass
+    def webcontent_filter(self,search_results:list[dict[str,dict | str]]):
+        for each_query_dict in search_results:
+            for index,each_link in enumerate(each_query_dict.get('result')):
+                pass
+                
 
     
     def webpage_content_extractor(self,each_result:dict):

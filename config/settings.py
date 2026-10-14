@@ -13,3 +13,5 @@ class Setting(BaseSettings):
     min_youtube_subscriber:int = 10000
     min_duration:int = 600
     max_google_result:int = 20
+    max_chunk_size:int = 1000
+    overlap_words:int = 10
