@@ -2,9 +2,9 @@ from pydantic import BaseModel
 from typing import Optional
 
 class Budget(BaseModel):
-    min:int
-    max:int
-    currency:str
+    min:Optional[int] = None
+    max:Optional[int] = None
+    currency:str = "INR"
 
 class BrandPreference(BaseModel):
     preferred:list

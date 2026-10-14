@@ -1,4 +1,3 @@
-
 import numpy as np
 from numpy.linalg import norm
 
@@ -12,19 +11,34 @@ def cosineSimilarity(vectorA, vectorB):
 
     return float(np.dot(A, B) / denominator)
 
-def retrieval(chunksVectors: list, queryVector, top_k=5):
+
+def retrieval(chunksVectors, queryVector, top_k=5, min_score=0.0):
+    chunks = np.asarray(chunksVectors)
+    if chunks.ndim != 2 or chunks.shape[0] == 0:
+        return []
+
+    q = np.asarray(queryVector).reshape(-1)
+    qNorm = norm(q)
+    if qNorm == 0:
+        return []
+
+    chunksNorms = norm(chunks, axis=1)
+    # avoid divide by zero for any zero vectors
+    validNorms = np.where(chunksNorms == 0, 1.0, chunksNorms)
+    scores = np.dot(chunks, q) / (validNorms * qNorm)
+    scores = np.where(chunksNorms == 0, 0.0, scores)
+
+    rankedIndices = np.argsort(-scores)
     vectorScoreList = []
-
-    for chunkVector in chunksVectors:
-        score = cosineSimilarity(chunkVector, queryVector)
+    for idx in rankedIndices:
+        score = float(scores[idx])
+        if score < min_score:
+            break
         vectorScoreList.append({
-            "vector": chunkVector,
-            "score": score
+            "index": int(idx),
+            "score": score,
         })
+        if len(vectorScoreList) >= top_k:
+            break
 
-    vectorScoreList.sort(
-        key=lambda item: item["score"],
-        reverse=True
-    )
-
-    return vectorScoreList[:top_k]
+    return vectorScoreList

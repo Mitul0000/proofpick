@@ -3,6 +3,7 @@ from models.search_result import GoogleSearchResult, YoutubeSearchResult
 
 
 class SourceSummary(BaseModel):
+    source_id:str = ""
     platform:str
     url:str
     title:str
@@ -39,3 +40,4 @@ class EvidencePack(BaseModel):
     stats:ResearchStats
     sources:list[SourceSummary]
     chunks:list[GoogleSearchResult | YoutubeSearchResult]
+    pool:list[GoogleSearchResult | YoutubeSearchResult] = []

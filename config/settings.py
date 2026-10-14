@@ -101,6 +101,24 @@ class Setting(BaseSettings):
     max_chunks_per_source_in_master: int = 3   # diversity cap per URL
 
     # ------------------------------------------------------------------
+    # LLM / Planner / Report
+    # ------------------------------------------------------------------
+    planner_model: str = "llama-3.3-70b-versatile"
+    report_model: str = "llama-3.3-70b-versatile"
+    planner_temperature: float = 0.2
+    report_temperature: float = 0.3
+    report_max_tokens: int = 4000
+    llm_max_retries: int = 2
+    llm_timeout: int = 60
+    num_youtube_queries: int = 10
+    num_web_queries: int = 10
+    whisper_translate: bool = True
+    report_chunk_max_chars: int = 1200
+    mcp_server_name: str = "proofpick"
+    log_level: str = "INFO"
+    log_file: str = str(BASE_DIR / "proofpick.log")
+
+    # ------------------------------------------------------------------
     # Pipeline / cache
     # ------------------------------------------------------------------
     cache_dir: str = str(BASE_DIR / "cache")
