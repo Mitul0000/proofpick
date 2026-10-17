@@ -25,6 +25,4 @@ def embeddings(texts:str | list[str])->np.ndarray:
         normalize_embeddings=True,
     )
     resultArray = np.asarray(result, dtype=np.float32)
-    if resultArray.ndim == 1:
-        resultArray = np.expand_dims(resultArray, axis=0)
     return resultArray
