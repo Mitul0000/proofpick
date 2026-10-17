@@ -46,6 +46,11 @@ class WebExtractor:
         return search_results
 
     def webcontent_filter(self,search_results:list[dict[str,dict | str]]):
+
+        # Here we can block the link by the domain and if the link is of any file like pdf and all.
+        # Then we can block that extension also. Also we filter out the duplicate links.
+        # This also helps to filter out the threats url by the google safe search. This will word if is it configured in setting and api is provided.
+
         for each_query_dict in search_results:
             raw_results = each_query_dict.get("result", [])
             filtered_results = []
@@ -69,7 +74,6 @@ class WebExtractor:
                 if is_blocked_domain:
                     continue
 
-                # check blocked file extensions
                 path_lower = parsed.path.lower()
                 is_blocked_ext = False
                 for ext in settings.blocked_file_extensions:
@@ -79,14 +83,13 @@ class WebExtractor:
                 if is_blocked_ext:
                     continue
 
-                # check duplicate urls within the same query
                 if href in seen_urls:
                     continue
                 seen_urls.add(href)
 
                 filtered_results.append(item)
 
-            # safe browsing check if enabled
+
             if settings.use_safe_browsing and settings.google_safe_browsing_api_key and filtered_results:
                 try:
                     threat_urls = self.check_safe_browsing([r["href"] for r in filtered_results])
