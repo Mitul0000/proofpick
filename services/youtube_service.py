@@ -28,14 +28,13 @@ class YoutubeSearch:
         links = []
 
         for string in self.search_string:
-            cache_key = f"yt_search:{string}:{setting.max_youtube_results}"
-            cached_data = getCache(cache_key)
+            search_url = f"ytsearch{setting.max_youtube_results}:{string}"
+            cached_data = getCache(search_url)
             if cached_data is not None:
                 logger.info(f"Loaded {len(cached_data)} cached YouTube results for query: '{string}'")
                 links.extend(cached_data)
                 continue
 
-            search_url = f"ytsearch{setting.max_youtube_results}:{string}"
             query_links = []
             logger.info(f"Searching YouTube for query: '{string}' (max {setting.max_youtube_results} results)")
             try:
@@ -65,7 +64,7 @@ class YoutubeSearch:
                             "channel_link": entry.get("channel_url") or "",
                         })
                 logger.info(f"Found {len(query_links)} eligible videos for query: '{string}'")
-                setCache(cache_key, query_links)
+                setCache(search_url, query_links)
                 links.extend(query_links)
             except Exception as e:
                 logger.error(f"YouTube search error for '{string}': {e}")
