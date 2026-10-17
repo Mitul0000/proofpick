@@ -30,18 +30,10 @@ def getCache(key:str):
     if row is None:
         return None
 
-    value, created_at = row
-    age_in_hours = (time.time() - created_at) / 3600
-
-    # old cache is treated as not present
-    if age_in_hours > settings.cache_ttl_hours:
-        return None
-
-    return json.loads(value)
+    return json.loads(row[0])
 
 
 def setCache(key:str, value):
-    # failed extractions come back as None, we do not want to remember those
     if value is None:
         return
 
