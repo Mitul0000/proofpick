@@ -73,7 +73,6 @@ class YoutubeSearch:
         return links
 
     def extract_transcript_by_youtube_api(self,url:str):
-        # returns tuple of (text, transcript_source)
         video_id_match = re.search(r"v=([^&]+)", url)
         if not video_id_match:
             return (None, "")
