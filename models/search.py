@@ -1,29 +1,7 @@
-# from pydantic import BaseModel
-# from typing import Optional
-
-
-# class SourceSearch(BaseModel):
-#     query:list[str]
-#     chunk_query:list[str]
-
-
-    
-# class SearchQuery(BaseModel):
-#     google_search:SourceSearch
-#     youtube_search:SourceSearch
-
-
 from pydantic import BaseModel, model_validator
 
 
 class SourceSearch(BaseModel):
-    """
-    `query` and `chunk_query` are PARALLEL lists:
-        query[i]        -> the string searched on the platform
-        chunk_query[i]  -> the query used to pull relevant chunks out of
-                           every document found by query[i]
-    """
-
     query: list[str]
     chunk_query: list[str]
 
@@ -46,20 +24,17 @@ class SourceSearch(BaseModel):
                 continue
             seen.add(q.lower())
             cleaned_queries.append(q)
-            cleaned_chunk_queries.append(cq or q)  # fall back to the search string
+            cleaned_chunk_queries.append(cq)
 
         self.query = cleaned_queries
         self.chunk_query = cleaned_chunk_queries
         return self
 
     def pairs(self) -> list[tuple[str, str]]:
-        """[(search_string, chunk_query), ...]"""
         return list(zip(self.query, self.chunk_query))
 
 
 class SearchQuery(BaseModel):
-    """The full search plan produced by the LLM after it understands the intent."""
-
     google_search: SourceSearch
     youtube_search: SourceSearch
     master_query: str
