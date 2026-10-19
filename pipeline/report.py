@@ -1,3 +1,15 @@
+# It takes intent and evidence pack as input. It checks wheather the chunks are present or not if not then it returns simple details from the evidence pack.
+# Other wise it makes a intent summary from intent, stats block, source table, evidence text from the evidence pack. User prompt is created and it contains all these
+# like user intent, reseach stats, source table, evidence chunks.
+
+# NOTE: Source table contains a key and details about the source like title,platform,domain,views,url
+# In the evidence chunks that key is mapped with the chunks so it becomes to identify that which chunks is coming from which source.
+
+# Then the user complete user prompt is given to the model and report is generated. The markdown in the report is sanitized.
+# For the report enhancement we are also counting for the each products how many distinct source we have searched in.
+
+# Atlast of the event we are also mentioning the details of the each source.
+
 import re
 import sys
 from pydantic import BaseModel
@@ -11,7 +23,7 @@ settings = Setting()
 
 class ReportProduct(BaseModel):
     name: str
-    role: str  # "best" | "alternative"
+    role: str
 
 
 class ReportOutput(BaseModel):
@@ -27,7 +39,7 @@ You will receive:
 4. Extracted evidence chunks tagged with their source IDs
 
 YOUR MANDATE:
-- Rely ONLY on the supplied evidence. Never invent specs, prices, links, features or counts.
+- Rely ONLY on the supplied evidence.If important details are missing like the price and some specs then you can search on web to find out that and add it.
 - Every factual sentence MUST end with citations like [S1] or [S2], [S3].
 - Separate verified facts from interpretations.
 - Mention conflicts, differing opinions, and uncertainty honestly.
@@ -39,7 +51,8 @@ Return a JSON object conforming strictly to this format:
   "products": [
     {"name": "<exact product name>", "role": "best"},
     {"name": "<alternative product 1>", "role": "alternative"},
-    {"name": "<alternative product 2>", "role": "alternative"}
+    {"name": "<alternative product 2>", "role": "alternative"},
+    {"name": "<alternative product 3>", "role": "alternative"}
   ],
   "markdown": "<Structured Markdown report according to the format below>"
 }
@@ -68,6 +81,7 @@ Actionable buying guidance and what to verify before purchase.
 
 def buildReport(intent:UserIntent, evidencePack:EvidencePack)->str:
     if not evidencePack.chunks:
+        print("Warning :- The report is being processed without the chunks")
         return (
             f"No usable evidence was found for your request.\n\n"
             f"- Videos found: {evidencePack.stats.videos_found} (read: {evidencePack.stats.videos_read})\n"
@@ -75,11 +89,9 @@ def buildReport(intent:UserIntent, evidencePack:EvidencePack)->str:
             f"- Usable chunks: 0\n"
         )
 
-    # url to source_id mapping
     urlToSourceId = {s.url: s.source_id for s in evidencePack.sources}
     validSourceIds = {s.source_id for s in evidencePack.sources}
 
-    # build context: (a) intent summary
     intentSummary = (
         f"Product Category: {intent.product_category}\n"
         f"Use Case: {intent.use_case}\n"
@@ -89,20 +101,20 @@ def buildReport(intent:UserIntent, evidencePack:EvidencePack)->str:
         f"Brand Preferences: {intent.brand_preference.model_dump_json() if intent.brand_preference else 'None'}"
     )
 
-    # build context: (b) stats block
+
     statsBlock = (
         f"Videos found: {evidencePack.stats.videos_found}, read: {evidencePack.stats.videos_read}\n"
         f"Articles found: {evidencePack.stats.articles_found}, read: {evidencePack.stats.articles_read}\n"
         f"Chunks evaluated: {evidencePack.stats.chunks_before_master}, final chunks: {evidencePack.stats.chunks_final}"
     )
 
-    # build context: (c) source table
+
     sourceTableLines = ["[S#] | Title | Platform | Channel/Domain | Views | URL"]
     for s in evidencePack.sources:
         sourceTableLines.append(f"[{s.source_id}] | {s.title} | {s.platform} | {s.author} | {s.views} | {s.url}")
     sourceTable = "\n".join(sourceTableLines)
 
-    # build context: (d) evidence chunks
+
     chunkLines = []
     for c in evidencePack.chunks:
         sId = urlToSourceId.get(c.url, "S?")
@@ -127,10 +139,8 @@ def buildReport(intent:UserIntent, evidencePack:EvidencePack)->str:
 
     markdown = reportOutput.markdown
 
-    # normalize full-width brackets to standard brackets
     markdown = markdown.replace("【", "[").replace("】", "]")
 
-    # post-processing: remove invalid [S#] tags that do not exist in source table
     def sanitizeCitation(match):
         tag = match.group(0)
         sId = match.group(1)
@@ -140,7 +150,7 @@ def buildReport(intent:UserIntent, evidencePack:EvidencePack)->str:
 
     markdown = re.sub(r"\[(S\d+)\]", sanitizeCitation, markdown)
 
-    # count distinct sources in pool where each product name appears
+    # count different sources in pool where each product name appears
     mentionCounts = []
     for p in reportOutput.products:
         pName = p.name.strip().lower()
@@ -164,7 +174,6 @@ def buildReport(intent:UserIntent, evidencePack:EvidencePack)->str:
             "total": len(vSources) + len(aSources),
         })
 
-    # append "Research coverage" section
     coverageLines = [
         "\n\n## Research coverage",
         f"- **Videos found**: {evidencePack.stats.videos_found} (read: {evidencePack.stats.videos_read})",
@@ -181,7 +190,6 @@ def buildReport(intent:UserIntent, evidencePack:EvidencePack)->str:
 
     markdown += "\n".join(coverageLines)
 
-    # append "Sources" section
     sourcesLines = ["\n\n## Sources"]
     for s in evidencePack.sources:
         sourcesLines.append(f"- [{s.source_id}] {s.title} - {s.author} - {s.views} views - {s.url}")
