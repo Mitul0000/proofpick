@@ -1,4 +1,5 @@
 import sys
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from config.settings import Setting
 from core.Rag.embedding import embeddings
@@ -8,12 +9,12 @@ from models.search import SearchQuery, SourceSearch
 from models.search_result import GoogleSearchResult, YoutubeSearchResult
 from services.web_service import WebExtractor
 from services.youtube_service import YoutubeSearch
+from numpy.linalg import norm
 
 settings = Setting()
 
 
 def youtubeBranch(source:SourceSearch):
-    # returns (results: list[YoutubeSearchResult], stats: list[QueryStats], meta: dict)
     yt = YoutubeSearch(source.query)
     rawVideos = yt.search_youtube()
     videosWithTranscript = yt.get_transcript(rawVideos)
@@ -28,7 +29,6 @@ def youtubeBranch(source:SourceSearch):
             continue
         if url not in uniqueVideos:
             uniqueVideos[url] = v
-        # check transcript source
         src = v.get("transcript_source")
         if src == "youtube_captions":
             captionsCount += 1
@@ -98,7 +98,6 @@ def youtubeBranch(source:SourceSearch):
 
 
 def webBranch(source:SourceSearch):
-    # returns (results: list[GoogleSearchResult], stats: list[QueryStats], meta: dict)
     web = WebExtractor(source.query)
     rawResults = web.search_on_web()
     filteredResults = web.webcontent_filter(rawResults)
@@ -174,7 +173,6 @@ def webBranch(source:SourceSearch):
 
 
 def runResearch(plan:SearchQuery)->EvidencePack:
-    # run both branches in parallel
     with ThreadPoolExecutor(max_workers=2) as executor:
         futureYt = executor.submit(youtubeBranch, plan.youtube_search)
         futureWeb = executor.submit(webBranch, plan.google_search)
@@ -182,7 +180,6 @@ def runResearch(plan:SearchQuery)->EvidencePack:
         ytResults, ytStats, ytMeta = futureYt.result()
         webResults, webStats, webMeta = futureWeb.result()
 
-    # merge into pool, deduplicate (url, chunk_index) keeping higher chunk_match_score
     mergedMap = {}
     for item in ytResults + webResults:
         key = (item.url, item.chunk_index)
@@ -191,22 +188,16 @@ def runResearch(plan:SearchQuery)->EvidencePack:
 
     pool = list(mergedMap.values())
 
-    # master rerank step
+
     if pool:
         masterVector = embeddings(plan.master_query)[0]
-        # chunk texts to vector
         chunkTexts = [item.chunk_text for item in pool]
         chunkVectors = embeddings(chunkTexts)
-
-        # compute cosine similarity against masterVector
-        import numpy as np
-        from numpy.linalg import norm
         mNorm = norm(masterVector)
         cVNorms = norm(chunkVectors, axis=1)
         validNorms = np.where(cVNorms == 0, 1.0, cVNorms)
         scores = np.dot(chunkVectors, masterVector) / (validNorms * (mNorm if mNorm != 0 else 1.0))
         scores = np.where(cVNorms == 0, 0.0, scores)
-
         validPool = []
         for i, item in enumerate(pool):
             s = float(scores[i])
@@ -222,9 +213,9 @@ def runResearch(plan:SearchQuery)->EvidencePack:
             maxPerSource=settings.max_chunks_per_source_in_master,
         )
     else:
+        print("Continues to work without the final chunks")
         finalChunks = []
 
-    # build SourceSummary for every url appearing in finalChunks
     sourceMap = {}
     for chunk in finalChunks:
         url = chunk.url
@@ -247,7 +238,6 @@ def runResearch(plan:SearchQuery)->EvidencePack:
         if chunk.master_match_score > sourceMap[url]["best_score"]:
             sourceMap[url]["best_score"] = chunk.master_match_score
 
-    # order sources by best score desc
     sortedSources = sorted(sourceMap.values(), key=lambda s: s["best_score"], reverse=True)
     sourcesList = []
     for i, s in enumerate(sortedSources, start=1):
