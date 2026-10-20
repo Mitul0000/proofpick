@@ -71,19 +71,24 @@ RULES:
 """
 
 
-def _countPriorClarificationRounds(history: list[str] | None) -> int:
-    """Counts how many times clarification questions have already been asked in the conversation."""
+def _countPriorClarificationRounds(history: list[str] | None, explicitRound: int | None = None) -> int:
+    """Counts conversation turns and prior clarification rounds."""
+    if explicitRound is not None and explicitRound > 0:
+        return explicitRound
     if not history:
         return 0
+    # Also count number of user turns / exchanges in history
+    # Typically each turn is an assistant response or user message; >= 2 exchanges means clarifications occurred
+    turns = len(history) // 2
     count = 0
     for h in history:
         hLower = h.lower()
-        if "clarification before researching" in hLower or "what is your budget" in hLower or "could you specify your intended use case" in hLower:
+        if "clarification" in hLower or "what is your budget" in hLower or "could you specify" in hLower or "preferred or avoided" in hLower:
             count += 1
-    return count
+    return max(count, turns)
 
 
-def analyzeIntent(userMessage:str, history:list[str]|None=None)->UserIntent:
+def analyzeIntent(userMessage:str, history:list[str]|None=None, clarification_round:int|None=None)->UserIntent:
     userPrompt = f"User message: {userMessage}"
     if history:
         historyStr = "\n".join(history)
@@ -97,11 +102,11 @@ def analyzeIntent(userMessage:str, history:list[str]|None=None)->UserIntent:
         temperature=settings.planner_temperature,
     )
 
-    # Cap clarification rounds: if history already has 2 or more clarification rounds, proceed with sensible defaults
+    # Cap clarification rounds: if >= 2 rounds have occurred, proceed with sensible defaults
     if intent.clarification and intent.clarification.is_ambiguous:
-        rounds = _countPriorClarificationRounds(history)
+        rounds = _countPriorClarificationRounds(history, clarification_round)
         if rounds >= 2:
-            logger.info("Clarification round cap reached (>= 2). Overriding ambiguity to proceed with sensible defaults.")
+            logger.info(f"Clarification round cap reached ({rounds} >= 2). Overriding ambiguity to proceed with sensible defaults.")
             intent.clarification.is_ambiguous = False
             intent.clarification.missing_info = []
 

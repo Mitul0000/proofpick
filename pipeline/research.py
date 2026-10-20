@@ -1,7 +1,8 @@
 import logging
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor
 from numpy.linalg import norm
 from config.settings import Setting
 from core.Rag.embedding import embeddings
@@ -16,7 +17,11 @@ settings = Setting()
 logger = logging.getLogger("proofpick.research")
 
 
-def youtubeBranch(source:SourceSearch):
+def youtubeBranch(source:SourceSearch, deadline: float | None = None):
+    if deadline and time.monotonic() > deadline:
+        logger.warning("YouTube branch skipped: deadline exceeded before search.")
+        return [], [], {"videos_found": 0, "videos_read": 0, "transcripts_from_captions": 0, "transcripts_from_whisper": 0}
+
     yt = YoutubeSearch(source.query)
     rawVideos = yt.search_youtube()
     videosWithTranscript = yt.get_transcript(rawVideos)
@@ -39,6 +44,9 @@ def youtubeBranch(source:SourceSearch):
 
     documents = {}
     for url, video in uniqueVideos.items():
+        if deadline and time.monotonic() > deadline:
+            logger.warning("YouTube document building halted: deadline exceeded.")
+            break
         transcript = (video.get("transcript") or "").strip()
         if not transcript:
             continue
@@ -48,6 +56,9 @@ def youtubeBranch(source:SourceSearch):
     statsList = []
 
     for query, chunkQuery in source.pairs():
+        if deadline and time.monotonic() > deadline:
+            logger.warning("YouTube query loop halted: deadline exceeded.")
+            break
         videosForQuery = [v for v in videosWithTranscript if v.get("search_query") == query]
         docsRead = 0
         chunksKept = 0
@@ -55,6 +66,8 @@ def youtubeBranch(source:SourceSearch):
         queryVector = embeddings(chunkQuery)[0]
 
         for video in videosForQuery:
+            if deadline and time.monotonic() > deadline:
+                break
             url = video.get("link")
             if not url or url not in documents:
                 continue
@@ -99,7 +112,11 @@ def youtubeBranch(source:SourceSearch):
     return results, statsList, meta
 
 
-def webBranch(source:SourceSearch):
+def webBranch(source:SourceSearch, deadline: float | None = None):
+    if deadline and time.monotonic() > deadline:
+        logger.warning("Web branch skipped: deadline exceeded before search.")
+        return [], [], {"articles_found": 0, "articles_read": 0, "documents": {}}
+
     web = WebExtractor(source.query)
     rawResults = web.search_on_web()
     filteredResults = web.webcontent_filter(rawResults)
@@ -118,6 +135,9 @@ def webBranch(source:SourceSearch):
 
     documents = {}
     for url, page in uniquePages.items():
+        if deadline and time.monotonic() > deadline:
+            logger.warning("Web document building halted: deadline exceeded.")
+            break
         content = (page.get("web content") or "").strip()
         if not content:
             continue
@@ -127,6 +147,9 @@ def webBranch(source:SourceSearch):
     statsList = []
 
     for query, chunkQuery in source.pairs():
+        if deadline and time.monotonic() > deadline:
+            logger.warning("Web query loop halted: deadline exceeded.")
+            break
         matchingGroup = next((g for g in contentResults if g.get("query") == query), None)
         pagesForQuery = matchingGroup.get("result", []) if matchingGroup else []
         docsRead = 0
@@ -135,6 +158,8 @@ def webBranch(source:SourceSearch):
         queryVector = embeddings(chunkQuery)[0]
 
         for page in pagesForQuery:
+            if deadline and time.monotonic() > deadline:
+                break
             url = page.get("href")
             if not url or url not in documents:
                 continue
@@ -174,28 +199,39 @@ def webBranch(source:SourceSearch):
     return results, statsList, meta
 
 
-def runResearch(plan:SearchQuery, progressCallback=None)->EvidencePack:
+def runResearch(plan:SearchQuery, progressCallback=None, deadline: float | None = None)->EvidencePack:
     if progressCallback:
         progressCallback(1, 4, "Starting parallel YouTube & Web research...")
 
     ytResults, ytStats, ytMeta = [], [], {}
     webResults, webStats, webMeta = [], [], {}
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futureYt = executor.submit(youtubeBranch, plan.youtube_search)
-        futureWeb = executor.submit(webBranch, plan.google_search)
+    executor = ThreadPoolExecutor(max_workers=2)
+    futureYt = executor.submit(youtubeBranch, plan.youtube_search, deadline)
+    futureWeb = executor.submit(webBranch, plan.google_search, deadline)
+    futures = {futureYt: "youtube", futureWeb: "web"}
 
-        try:
-            ytResults, ytStats, ytMeta = futureYt.result()
-        except Exception as e:
-            logger.error(f"YouTube branch failed: {e}")
-            ytMeta = {"videos_found": 0, "videos_read": 0, "error": str(e)}
+    remaining = max(0.0, deadline - time.monotonic()) if deadline else None
 
-        try:
-            webResults, webStats, webMeta = futureWeb.result()
-        except Exception as e:
-            logger.error(f"Web branch failed: {e}")
-            webMeta = {"articles_found": 0, "articles_read": 0, "error": str(e)}
+    try:
+        for fut in as_completed(futures, timeout=remaining):
+            branchName = futures[fut]
+            try:
+                res, stats, meta = fut.result()
+                if branchName == "youtube":
+                    ytResults, ytStats, ytMeta = res, stats, meta
+                else:
+                    webResults, webStats, webMeta = res, stats, meta
+            except Exception as e:
+                logger.error(f"{branchName} branch failed: {e}")
+                if branchName == "youtube":
+                    ytMeta = {"videos_found": 0, "videos_read": 0, "error": str(e)}
+                else:
+                    webMeta = {"articles_found": 0, "articles_read": 0, "error": str(e)}
+    except (TimeoutError, Exception) as te:
+        logger.warning(f"Research thread execution deadline reached or interrupted: {te}. Shutting down worker pool.")
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
     if progressCallback:
         progressCallback(2, 4, "Merging and deduplicating extracted evidence...")

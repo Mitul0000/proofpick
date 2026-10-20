@@ -15,15 +15,20 @@ settings = Setting()
 logger = logging.getLogger("proofpick.web")
 
 
-def isPrivateOrLoopbackHost(host: str) -> bool:
+def isPrivateOrLoopbackHost(host: str, timeout: float = 3.0) -> bool:
     """Checks if a hostname resolves to private, loopback, or reserved IP ranges (SSRF prevention)."""
     if not host:
         return True
     hostLower = host.lower()
     if hostLower in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
         return True
+    # Strip port if present in host argument (e.g., example.com:8080)
+    if ":" in hostLower and not hostLower.startswith("["):
+        hostLower = hostLower.split(":")[0]
+    origTimeout = socket.getdefaulttimeout()
     try:
-        addrInfo = socket.getaddrinfo(host, None)
+        socket.setdefaulttimeout(timeout)
+        addrInfo = socket.getaddrinfo(hostLower, None)
         for family, _, _, _, sockaddr in addrInfo:
             ipStr = sockaddr[0]
             ipObj = ipaddress.ip_address(ipStr)
@@ -31,6 +36,8 @@ def isPrivateOrLoopbackHost(host: str) -> bool:
                 return True
     except Exception:
         return True
+    finally:
+        socket.setdefaulttimeout(origTimeout)
     return False
 
 
@@ -143,30 +150,52 @@ class WebExtractor:
             return each_result
 
         parsed = urlparse(url)
-        host = parsed.netloc or ""
+        host = (parsed.hostname or "").lower()
         domain = host[4:] if host.startswith("www.") else host
 
-        if isPrivateOrLoopbackHost(domain):
+        if isPrivateOrLoopbackHost(host):
             return each_result
 
         try:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
             }
-            # Stream body with max byte cap and check redirect destinations
-            with requests.get(
-                url,
-                timeout=settings.web_fetch_timeout,
-                headers=headers,
-                stream=True,
-                allow_redirects=True,
-            ) as response:
-                finalHost = urlparse(response.url).hostname or ""
-                if isPrivateOrLoopbackHost(finalHost):
+            # Follow redirects manually (max 5 hops) checking hostname on every hop to avoid SSRF bypasses
+            currentUrl = url
+            response = None
+            maxHops = 5
+
+            for _ in range(maxHops):
+                currHost = (urlparse(currentUrl).hostname or "").lower()
+                if isPrivateOrLoopbackHost(currHost):
                     return each_result
 
+                resp = requests.get(
+                    currentUrl,
+                    timeout=settings.web_fetch_timeout,
+                    headers=headers,
+                    stream=True,
+                    allow_redirects=False,
+                )
+                if resp.is_redirect or resp.status_code in (301, 302, 303, 307, 308):
+                    redirectLocation = resp.headers.get("Location")
+                    resp.close()
+                    if not redirectLocation:
+                        return each_result
+                    from urllib.parse import urljoin
+                    currentUrl = urljoin(currentUrl, redirectLocation)
+                else:
+                    response = resp
+                    break
+
+            if response is None or response.status_code != 200:
+                if response:
+                    response.close()
+                return each_result
+
+            try:
                 content_type = response.headers.get("Content-Type", "").lower()
-                if response.status_code != 200 or "text/html" not in content_type:
+                if "text/html" not in content_type:
                     return each_result
 
                 bodyBytes = b""
@@ -174,6 +203,8 @@ class WebExtractor:
                     bodyBytes += chunk
                     if len(bodyBytes) >= settings.web_max_download_bytes:
                         break
+            finally:
+                response.close()
 
             soup = BeautifulSoup(bodyBytes, "html.parser")
             for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form", "noscript"]):

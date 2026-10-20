@@ -60,15 +60,17 @@ Actionable buying guidance and what to verify before purchase.
 
 
 def _tokenOverlapMatch(targetName: str, text: str) -> bool:
-    """Matches product by key tokens (ignoring short stopwords like 5g, pro, in, under)."""
-    targetTokens = [
-        t.lower() for t in re.findall(r"\w+", targetName)
-        if len(t) > 1 and t.lower() not in {"the", "and", "for", "with", "5g", "pro", "plus", "ultra"}
+    """Matches product by key tokens, preserving numbers (8, 24) and variant qualifiers (pro, ultra) while treating 5g/connectivity as optional."""
+    allTokens = [t.lower() for t in re.findall(r"\w+", targetName) if t.strip()]
+    # Only drop connectivity/generic stopwords; keep numbers like '8' and variant words like 'pro', 'ultra', 'plus'
+    keyTokens = [
+        t for t in allTokens
+        if t not in {"the", "and", "for", "with", "in", "by", "under", "5g", "4g", "lte", "wifi"}
     ]
-    if not targetTokens:
+    if not keyTokens:
         return targetName.lower() in text.lower()
     textLower = text.lower()
-    return all(tok in textLower for tok in targetTokens)
+    return all(re.search(r"\b" + re.escape(tok) + r"\b", textLower) for tok in keyTokens)
 
 
 def buildReport(intent:UserIntent, evidencePack:EvidencePack)->str:
@@ -124,14 +126,18 @@ def buildReport(intent:UserIntent, evidencePack:EvidencePack)->str:
         temperature=settings.report_temperature,
     )
 
-    # Parse PRODUCTS: a | b | c line from bottom
+    # Parse PRODUCTS: line with ^\W*PRODUCTS\s*: to handle bold/markdown formatting
     products = []
     markdownLines = []
+    productsRegex = re.compile(r"^\W*PRODUCTS\s*:\s*", re.IGNORECASE)
     for line in rawReport.splitlines():
-        if line.strip().startswith("PRODUCTS:"):
-            names = line.split("PRODUCTS:", 1)[1].split("|")
+        if productsRegex.match(line):
+            rawProductsText = productsRegex.sub("", line).strip()
+            # clean possible trailing markdown asterisks/underscores
+            rawProductsText = re.sub(r"[\*_]+$", "", rawProductsText).strip()
+            names = rawProductsText.split("|")
             for idx, n in enumerate(names):
-                nClean = n.strip()
+                nClean = n.strip().strip("*_`")
                 if nClean:
                     products.append(ReportProduct(name=nClean, role="best" if idx == 0 else "alternative"))
         else:

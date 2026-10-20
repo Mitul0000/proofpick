@@ -56,6 +56,18 @@ def _extractJsonBlock(rawText: str) -> str:
     return cleaned
 
 
+def _checkSamplingCapability(session: Any) -> bool:
+    """Checks whether the connected MCP client supports sampling."""
+    try:
+        import mcp.types as types
+        if hasattr(session, "check_client_capability"):
+            cap = types.ClientCapabilities(sampling=types.SamplingCapability())
+            return session.check_client_capability(cap)
+    except Exception as e:
+        logger.debug(f"Client capability check failed: {e}")
+    return True
+
+
 def _sampleViaEventLoop(session: Any, loop: Any, systemPrompt: str, userPrompt: str, maxTokens: int = 4000) -> str:
     """Dispatches create_message onto the server's main event loop using run_coroutine_threadsafe or direct call."""
     import mcp.types as types
@@ -78,10 +90,15 @@ def _sampleViaEventLoop(session: Any, loop: Any, systemPrompt: str, userPrompt: 
             return content[0].text
         return str(content)
 
+    timeout = getattr(settings, "sampling_timeout", 180)
     if loop.is_running():
         # Invoked from a worker thread (asyncio.to_thread)
         future = asyncio.run_coroutine_threadsafe(_call(), loop)
-        return future.result(timeout=settings.llm_timeout)
+        try:
+            return future.result(timeout=timeout)
+        except (TimeoutError, asyncio.TimeoutError):
+            future.cancel()
+            raise TimeoutError(f"MCP sampling timed out after {timeout}s")
     else:
         # Loop is not currently running (e.g. sync unit test thread)
         return loop.run_until_complete(_call())
@@ -90,31 +107,41 @@ def _sampleViaEventLoop(session: Any, loop: Any, systemPrompt: str, userPrompt: 
 def askJson(systemPrompt:str, userPrompt:str, schemaModel:type[BaseModel], model:str|None=None, temperature:float|None=None):
     contextData = samplingContextVar.get()
 
-    # 1. Try MCP Sampling if client session is active
+    # 1. Try MCP Sampling if client session is active and supports sampling
     if contextData is not None:
         ctx, loop = contextData
         session = getattr(ctx, "session", None)
         if session is not None and loop is not None:
-            promptWithSchema = (
-                f"{userPrompt}\n\nIMPORTANT: Respond ONLY with a valid JSON object matching this schema:\n"
-                f"{json.dumps(schemaModel.model_json_schema())}"
-            )
-            currentPrompt = promptWithSchema
-            for attempt in range(settings.llm_max_retries + 1):
-                try:
-                    logger.info(f"Attempting MCP sampling via caller model (attempt {attempt + 1})...")
-                    rawText = _sampleViaEventLoop(session, loop, systemPrompt, currentPrompt)
-                    jsonCandidate = _extractJsonBlock(rawText)
-                    parsed = schemaModel.model_validate_json(jsonCandidate)
-                    logger.info("MCP sampling succeeded and validated schema.")
-                    return parsed
-                except Exception as e:
-                    logger.warning(f"MCP sampling attempt {attempt + 1} validation error: {e}")
-                    currentPrompt = (
-                        f"{promptWithSchema}\n\nPrevious response failed validation with error: {e}. "
-                        "Please fix and output ONLY the raw JSON object from { to }."
-                    )
-            logger.warning("MCP sampling retries exhausted, attempting Groq fallback if configured...")
+            if not _checkSamplingCapability(session):
+                logger.info("MCP client does not declare sampling capability; skipping to Groq fallback.")
+            else:
+                promptWithSchema = (
+                    f"{userPrompt}\n\nIMPORTANT: Respond ONLY with a valid JSON object matching this schema:\n"
+                    f"{json.dumps(schemaModel.model_json_schema())}"
+                )
+                currentPrompt = promptWithSchema
+                for attempt in range(settings.llm_max_retries + 1):
+                    try:
+                        logger.info(f"Attempting MCP sampling via caller model (attempt {attempt + 1})...")
+                        rawText = _sampleViaEventLoop(session, loop, systemPrompt, currentPrompt)
+                        jsonCandidate = _extractJsonBlock(rawText)
+                        parsed = schemaModel.model_validate_json(jsonCandidate)
+                        logger.info("MCP sampling succeeded and validated schema.")
+                        return parsed
+                    except (json.JSONDecodeError, ValueError) as ve:
+                        # Validation or JSON parse error: safe to retry with error feedback
+                        logger.warning(f"MCP sampling attempt {attempt + 1} validation error: {ve}")
+                        if attempt < settings.llm_max_retries:
+                            currentPrompt = (
+                                f"{promptWithSchema}\n\nPrevious response failed validation with error: {ve}. "
+                                "Please fix and output ONLY the raw JSON object from { to }."
+                            )
+                        else:
+                            logger.warning("MCP sampling retries exhausted, attempting Groq fallback...")
+                    except Exception as e:
+                        # Permission, transport, or unexpected error: do not retry in sampling, fall straight to Groq
+                        logger.warning(f"MCP sampling encountered non-validation error ({e}); falling back immediately to Groq.")
+                        break
 
     # 2. Fallback to Groq API
     c = getClient()
@@ -158,15 +185,18 @@ def askText(systemPrompt:str, userPrompt:str, model:str|None=None, temperature:f
         ctx, loop = contextData
         session = getattr(ctx, "session", None)
         if session is not None and loop is not None:
-            try:
-                logger.info("Calling askText via MCP sampling...")
-                text = _sampleViaEventLoop(
-                    session, loop, systemPrompt, userPrompt, maxTokens=max_tokens or settings.report_max_tokens
-                )
-                logger.info("MCP sampling askText succeeded.")
-                return text or ""
-            except Exception as e:
-                logger.warning(f"MCP sampling askText failed ({e}), falling back to Groq...")
+            if not _checkSamplingCapability(session):
+                logger.info("MCP client does not declare sampling capability for askText; skipping to Groq.")
+            else:
+                try:
+                    logger.info("Calling askText via MCP sampling...")
+                    text = _sampleViaEventLoop(
+                        session, loop, systemPrompt, userPrompt, maxTokens=max_tokens or settings.report_max_tokens
+                    )
+                    logger.info("MCP sampling askText succeeded.")
+                    return text or ""
+                except Exception as e:
+                    logger.warning(f"MCP sampling askText failed ({e}), falling back to Groq...")
 
     c = getClient()
     if c is None:

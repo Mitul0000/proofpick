@@ -3,6 +3,7 @@ import logging
 import sys
 import threading
 from mcp.server.fastmcp import FastMCP, Context
+import time
 from config.settings import Setting
 from core.Rag.embedding import getModel
 from core.llm import setSamplingContext, clearSamplingContext
@@ -88,14 +89,8 @@ async def research_product(message:str, history:list[str]|None=None, ctx:Context
                 pct = int(25 + (step / total) * 50)
                 asyncio.run_coroutine_threadsafe(ctx.report_progress(pct, 100), loop)
 
-        try:
-            evidencePack = await asyncio.wait_for(
-                asyncio.to_thread(runResearch, plan, _onProgress),
-                timeout=settings.run_timeout_seconds,
-            )
-        except asyncio.TimeoutError:
-            logging.warning(f"Research time budget ({settings.run_timeout_seconds}s) reached. Proceeding with partial results...")
-            evidencePack = await asyncio.to_thread(runResearch, plan, None)
+        deadline = time.monotonic() + settings.run_timeout_seconds
+        evidencePack = await asyncio.to_thread(runResearch, plan, _onProgress, deadline)
 
         if ctx:
             await ctx.report_progress(80, 100)
@@ -124,7 +119,8 @@ async def get_evidence(message:str, history:list[str]|None=None, ctx:Context=Non
     try:
         intent = await asyncio.to_thread(analyzeIntent, message, history)
         plan = await asyncio.to_thread(buildSearchPlan, intent)
-        evidencePack = await asyncio.to_thread(runResearch, plan)
+        deadline = time.monotonic() + settings.run_timeout_seconds
+        evidencePack = await asyncio.to_thread(runResearch, plan, None, deadline)
         return evidencePack.model_dump(exclude={"pool"})
     finally:
         clearSamplingContext()

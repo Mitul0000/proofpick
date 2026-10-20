@@ -66,6 +66,7 @@ class Setting(BaseSettings):
     report_max_tokens: int = 4000
     llm_max_retries: int = 2
     llm_timeout: int = 45
+    sampling_timeout: int = 180
     num_youtube_queries: int = 3
     num_web_queries: int = 3
     whisper_translate: bool = True

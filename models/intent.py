@@ -7,8 +7,8 @@ class Budget(BaseModel):
     currency:str = "INR"
 
 class BrandPreference(BaseModel):
-    preferred:list
-    avoid:list
+    preferred: list = []
+    avoid: list = []
 
 class ClarificationNeeded(BaseModel):
     is_ambiguous:bool
