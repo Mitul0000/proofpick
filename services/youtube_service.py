@@ -199,7 +199,7 @@ class YoutubeSearch:
             logger.error(f"Audio download failed for {url}: {e}")
             return None
 
-    def get_transcript(self, links: list[dict[str, str]]):
+    def get_transcript(self, links: list[dict[str, str]], deadline: float | None = None):
         unique_urls = list({link.get("link") for link in links if link.get("link")})
         url_transcripts = {}
 
@@ -210,9 +210,25 @@ class YoutubeSearch:
                 logger.error(f"Failed extracting transcript for {url}: {e}")
                 return (url, (None, ""))
 
-        with ThreadPoolExecutor(max_workers=setting.youtube_workers) as executor:
-            for url, (transcript, transcript_source) in executor.map(fetch_one, unique_urls):
-                url_transcripts[url] = (transcript, transcript_source)
+        executor = ThreadPoolExecutor(max_workers=setting.youtube_workers)
+        futureToUrl = {executor.submit(fetch_one, u): u for u in unique_urls}
+        import time
+        from concurrent.futures import as_completed
+
+        remaining = max(0.0, deadline - time.monotonic()) if deadline is not None else None
+        try:
+            for fut in as_completed(futureToUrl, timeout=remaining):
+                try:
+                    url, res = fut.result()
+                    url_transcripts[url] = res
+                except Exception as e:
+                    u = futureToUrl[fut]
+                    logger.error(f"Failed extracting transcript future for {u}: {e}")
+                    url_transcripts[u] = (None, "")
+        except (TimeoutError, Exception) as te:
+            logger.warning(f"YouTube transcript fetching reached deadline or timed out: {te}")
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
         for link in links:
             url = link.get("link")

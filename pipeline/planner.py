@@ -72,23 +72,20 @@ RULES:
 
 
 def _countPriorClarificationRounds(history: list[str] | None, explicitRound: int | None = None) -> int:
-    """Counts conversation turns and prior clarification rounds."""
+    """Counts conversation prior clarification rounds based on explicit parameter or clarifying prompts in history."""
     if explicitRound is not None and explicitRound > 0:
         return explicitRound
     if not history:
         return 0
-    # Also count number of user turns / exchanges in history
-    # Typically each turn is an assistant response or user message; >= 2 exchanges means clarifications occurred
-    turns = len(history) // 2
     count = 0
     for h in history:
         hLower = h.lower()
         if "clarification" in hLower or "what is your budget" in hLower or "could you specify" in hLower or "preferred or avoided" in hLower:
             count += 1
-    return max(count, turns)
+    return count
 
 
-def analyzeIntent(userMessage:str, history:list[str]|None=None, clarification_round:int|None=None)->UserIntent:
+def analyzeIntent(userMessage:str, history:list[str]|None=None, clarification_round:int = 0)->UserIntent:
     userPrompt = f"User message: {userMessage}"
     if history:
         historyStr = "\n".join(history)

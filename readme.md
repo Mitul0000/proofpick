@@ -149,7 +149,7 @@ Add ProofPick to `~/.config/Claude/claude_desktop_config.json`:
 }
 ```
 
-> **Client Timeout Tip**: Deep research across multiple web pages and video transcripts can take 30–90 seconds. In your MCP client configuration, ensure tool call timeouts are set to at least 120 seconds.
+> **Client Timeout Tip**: End-to-end research includes intent parsing, parallel YouTube and web scraping, transcript processing, master semantic reranking, and comprehensive report generation. In your MCP client configuration, ensure tool call timeouts are set to at least 300 seconds.
 
 ---
 

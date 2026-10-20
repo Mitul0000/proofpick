@@ -24,7 +24,7 @@ def youtubeBranch(source:SourceSearch, deadline: float | None = None):
 
     yt = YoutubeSearch(source.query)
     rawVideos = yt.search_youtube()
-    videosWithTranscript = yt.get_transcript(rawVideos)
+    videosWithTranscript = yt.get_transcript(rawVideos, deadline=deadline)
 
     uniqueVideos = {}
     captionsCount = 0
@@ -120,7 +120,7 @@ def webBranch(source:SourceSearch, deadline: float | None = None):
     web = WebExtractor(source.query)
     rawResults = web.search_on_web()
     filteredResults = web.webcontent_filter(rawResults)
-    contentResults = web.get_web_content(filteredResults)
+    contentResults = web.get_web_content(filteredResults, deadline=deadline)
 
     uniquePages = {}
     articlesFound = set()

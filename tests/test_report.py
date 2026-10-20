@@ -23,6 +23,10 @@ class TestReport(unittest.TestCase):
         # 5G should be optional
         self.assertTrue(_tokenOverlapMatch("Poco X6 5G", "reviewing the poco x6 in 2026"))
 
+        # Brand prefix should be optional (Samsung Galaxy S24 Ultra matches review text saying Galaxy S24 Ultra)
+        self.assertTrue(_tokenOverlapMatch("Samsung Galaxy S24 Ultra", "the galaxy s24 ultra camera is outstanding"))
+        self.assertTrue(_tokenOverlapMatch("Apple iPhone 15 Pro", "iphone 15 pro battery life test"))
+
     def test_build_report_smoke(self):
         intent = UserIntent(
             raw_query="best laptop under 40000",

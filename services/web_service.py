@@ -15,6 +15,9 @@ settings = Setting()
 logger = logging.getLogger("proofpick.web")
 
 
+_dnsExecutor = ThreadPoolExecutor(max_workers=4)
+
+
 def isPrivateOrLoopbackHost(host: str, timeout: float = 3.0) -> bool:
     """Checks if a hostname resolves to private, loopback, or reserved IP ranges (SSRF prevention)."""
     if not host:
@@ -25,19 +28,18 @@ def isPrivateOrLoopbackHost(host: str, timeout: float = 3.0) -> bool:
     # Strip port if present in host argument (e.g., example.com:8080)
     if ":" in hostLower and not hostLower.startswith("["):
         hostLower = hostLower.split(":")[0]
-    origTimeout = socket.getdefaulttimeout()
+
     try:
-        socket.setdefaulttimeout(timeout)
-        addrInfo = socket.getaddrinfo(hostLower, None)
+        future = _dnsExecutor.submit(socket.getaddrinfo, hostLower, None)
+        addrInfo = future.result(timeout=timeout)
         for family, _, _, _, sockaddr in addrInfo:
             ipStr = sockaddr[0]
             ipObj = ipaddress.ip_address(ipStr)
             if ipObj.is_private or ipObj.is_loopback or ipObj.is_reserved or ipObj.is_link_local:
                 return True
     except Exception:
+        # On DNS resolution error or timeout, treat as blocked
         return True
-    finally:
-        socket.setdefaulttimeout(origTimeout)
     return False
 
 
@@ -230,7 +232,7 @@ class WebExtractor:
 
         return each_result
 
-    def get_web_content(self, search_results: list[dict[str, dict | str]]):
+    def get_web_content(self, search_results: list[dict[str, dict | str]], deadline: float | None = None):
         unique_urls = set()
         for query_group in search_results:
             for item in query_group.get("result", []):
@@ -245,10 +247,25 @@ class WebExtractor:
             self.webpage_content_extractor(dummy)
             return (url, dummy.get("web content"), dummy.get("domain"))
 
-        with ThreadPoolExecutor(max_workers=settings.web_workers) as executor:
-            for url, content, domain in executor.map(fetch_page, list(unique_urls)):
-                if content:
-                    url_data_map[url] = {"web content": content, "domain": domain}
+        executor = ThreadPoolExecutor(max_workers=settings.web_workers)
+        futureToUrl = {executor.submit(fetch_page, u): u for u in unique_urls}
+        import time
+        from concurrent.futures import as_completed
+
+        remaining = max(0.0, deadline - time.monotonic()) if deadline is not None else None
+        try:
+            for fut in as_completed(futureToUrl, timeout=remaining):
+                try:
+                    url, content, domain = fut.result()
+                    if content:
+                        url_data_map[url] = {"web content": content, "domain": domain}
+                except Exception as e:
+                    u = futureToUrl[fut]
+                    logger.error(f"Failed extracting web content for {u}: {e}")
+        except (TimeoutError, Exception) as te:
+            logger.warning(f"Web page fetching reached deadline or timed out: {te}")
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
         for query_group in search_results:
             valid_results = []

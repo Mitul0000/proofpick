@@ -59,18 +59,41 @@ Actionable buying guidance and what to verify before purchase.
 """
 
 
+KNOWN_BRANDS = {
+    "samsung", "apple", "google", "xiaomi", "redmi", "poco", "oneplus", "realme",
+    "motorola", "moto", "oppo", "vivo", "iqoo", "sony", "asus", "lenovo", "hp",
+    "dell", "acer", "msi", "lg", "boat", "noise", "boult", "zebronics", "fireboltt"
+}
+
+
 def _tokenOverlapMatch(targetName: str, text: str) -> bool:
-    """Matches product by key tokens, preserving numbers (8, 24) and variant qualifiers (pro, ultra) while treating 5g/connectivity as optional."""
+    """
+    Matches product by key tokens, preserving numbers (8, 24) and variant qualifiers (pro, ultra),
+    while treating connectivity (5g) and manufacturer brand prefix (e.g. 'Samsung') as optional.
+    """
     allTokens = [t.lower() for t in re.findall(r"\w+", targetName) if t.strip()]
-    # Only drop connectivity/generic stopwords; keep numbers like '8' and variant words like 'pro', 'ultra', 'plus'
+    # Drop connectivity and stopwords
     keyTokens = [
         t for t in allTokens
         if t not in {"the", "and", "for", "with", "in", "by", "under", "5g", "4g", "lte", "wifi"}
     ]
     if not keyTokens:
         return targetName.lower() in text.lower()
+
     textLower = text.lower()
-    return all(re.search(r"\b" + re.escape(tok) + r"\b", textLower) for tok in keyTokens)
+
+    # Check if all key tokens match directly
+    if all(re.search(r"\b" + re.escape(tok) + r"\b", textLower) for tok in keyTokens):
+        return True
+
+    # If the product name starts with or contains a known brand prefix and has other identifying tokens,
+    # allow matching without the brand token (e.g., "Galaxy S24 Ultra" matching "Samsung Galaxy S24 Ultra")
+    nonBrandTokens = [t for t in keyTokens if t not in KNOWN_BRANDS]
+    if nonBrandTokens and len(nonBrandTokens) < len(keyTokens):
+        if all(re.search(r"\b" + re.escape(tok) + r"\b", textLower) for tok in nonBrandTokens):
+            return True
+
+    return False
 
 
 def buildReport(intent:UserIntent, evidencePack:EvidencePack)->str:
