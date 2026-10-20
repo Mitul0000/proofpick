@@ -24,22 +24,12 @@ mcp = FastMCP(settings.mcp_server_name)
 
 @mcp.tool()
 async def analyze_intent(message:str, history:list[str]|None=None)->dict:
-    """
-    Analyzes the user's shopping or product research intent from their query and conversation history.
-    Extracts category, budget, priorities, dealbreakers, and checks whether clarification is needed.
-    """
     intent = await asyncio.to_thread(analyzeIntent, message, history)
     return intent.model_dump()
 
 
 @mcp.tool()
 async def research_product(message:str, history:list[str]|None=None)->str:
-    """
-    Runs an end-to-end product research and recommendation report.
-    Searches YouTube and the web, extracts transcripts and page content,
-    indexes information via semantic RAG, and produces a sourced Markdown recommendation report.
-    If the request is ambiguous, it returns clarifying questions.
-    """
     intent = await asyncio.to_thread(analyzeIntent, message, history)
 
     if intent.clarification and intent.clarification.is_ambiguous:
