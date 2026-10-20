@@ -6,63 +6,45 @@ ProofPick is a Model Context Protocol (MCP) server that acts as an autonomous AI
 
 ## Key Features
 
-- **Ambiguity & Intent Parsing**: Accurately extracts category, budget constraints, user use cases, priorities, and brand preferences. Automatically asks clarifying questions if a request is too vague.
-- **Multi-Angle Search Planning**: Generates distinct queries exploring best-of picks, long-term durability reviews, honest complaints/problems, and head-to-head comparisons.
+- **Ambiguity & Intent Parsing**: Accurately extracts category, budget constraints, user use cases, priorities, and brand preferences. Automatically asks clarifying questions if a request is too vague, with a 2-round cap to prevent infinite loops.
+- **MCP Client Model Sampling**: Uses MCP session sampling (`session.create_message`) to query the *same model running the client* (Codex, OpenCode, Claude) for intent analysis and report writing. External Groq LLM is used only as a fallback.
 - **YouTube Research Engine**:
   - Searches YouTube via `yt-dlp` with filters for minimum duration and view counts.
-  - Fetches transcripts using `youtube-transcript-api`.
-  - Automatically falls back to downloading audio and transcribing via Groq Whisper (`whisper-large-v3`) if captions are absent.
+  - Fetches captions via `youtube-transcript-api`.
+  - Intelligently chunks unpunctuated auto-generated video captions so that embeddings cover the entire video.
+  - Falls back to downloading audio and transcribing via Groq Whisper (`whisper-large-v3`) if captions are absent (transcodes to mono 32kbps MP3 allowing up to 90 min of speech under the 24 MB limit).
 - **Web Extraction Engine**:
-  - DuckDuckGo live search.
+  - DuckDuckGo live web search.
+  - SSRF protection: blocks private, loopback, and reserved IP ranges on both initial requests and redirects.
+  - Streams web page responses up to a 1 MB byte cap to prevent resource exhaustion.
   - Strips clutter, ads, navigation, and scripts using BeautifulSoup.
   - Filters out blocked domains (social media) and unsupported file extensions.
   - Optional Google Safe Browsing v4 threat detection.
 - **2-Stage Semantic RAG Pipeline**:
   - **Stage 1 (Document-Level RAG)**: Chunks raw transcripts and web pages, embeds them with `sentence-transformers/all-MiniLM-L6-v2`, and pulls only the top relevant excerpts per query, eliminating 90% of fluff.
   - **Stage 2 (Master Re-ranking & Source Diversity)**: Reranks the merged candidate pool against the user's master goal and applies a per-source cap so no single website or video dominates.
-- **Grounded Recommendation Reports**:
-  - The #1 best product with detailed justification.
-  - Two alternatives with clear "where it is better" and "where it is weaker" breakdowns.
-  - Feature comparison table.
-  - Conflicting claims and reviewer uncertainties.
-  - Strict citations (e.g. `[S1]`, `[S2]`) mapping to full source links, view counts, and authors.
-  - Real coverage audit statistics.
-- **Fast Local Caching**: SQLite-backed caching for web pages, YouTube searches, and transcripts with configurable TTL.
-- **Logging**: Configurable logging written directly to standard error (`stderr`) and auto-persisted to `proofpick.log`.
+- **Robustness & Branch Isolation**: If YouTube or web scraping encounters an issue, the surviving branch still provides research evidence. An overall execution budget ensures clients receive partial evidence rather than timing out.
+- **Prompt Injection Defense**: Untrusted external third-party chunks and transcripts are isolated in `<evidence>` delimiters with explicit instructions forbidding the LLM from executing commands found within scraped text.
+- **Fast Local Caching**: SQLite-backed caching with strict TTL enforcement and empty-result rejection.
 
 ---
 
-## Project Structure
+## System Requirements & Prerequisites
 
-```
-ProofPick/
-├── config/
-│   └── settings.py          # Central pydantic configuration & environment defaults
-├── core/
-│   ├── Rag/
-│   │   ├── chunking.py      # Intelligent sentence-boundary chunking
-│   │   ├── embedding.py     # Lazy model loading & batch embeddings
-│   │   ├── pipeline.py      # Document builder & source diversity ranking
-│   │   └── retrival.py      # NumPy matrix cosine similarity retrieval
-│   └── llm.py               # Groq client wrapper with schema validation & retries
-├── models/
-│   ├── cache.py             # SQLite caching layer
-│   ├── evidence.py          # EvidencePack, SourceSummary, and ResearchStats schemas
-│   ├── intent.py            # UserIntent and Budget data contracts
-│   ├── search.py            # SearchQuery and SourceSearch models
-│   └── search_result.py     # GoogleSearchResult and YoutubeSearchResult models
-├── pipeline/
-│   ├── planner.py           # analyzeIntent & buildSearchPlan logic
-│   ├── report.py            # buildReport & citation post-processing
-│   └── research.py          # Parallel youtubeBranch, webBranch & master rerank
-├── services/
-│   ├── web_service.py       # DuckDuckGo search, HTML cleaning & page scraper
-│   └── youtube_service.py   # YouTube search, captions fetch & Whisper fallback
-├── .env.example             # Template for API keys and configurable limits
-├── main.py                  # FastMCP server entry point & tool definitions
-├── proofpick.log            # Execution log file
-└── requirements.txt         # Project dependencies
-```
+1. **Python 3.10+**
+2. **ffmpeg** (Required by `yt-dlp` for Whisper audio extraction and conversion):
+   ```bash
+   # Ubuntu / Debian
+   sudo apt install ffmpeg
+
+   # Fedora / RHEL
+   sudo dnf install ffmpeg
+
+   # macOS
+   brew install ffmpeg
+   ```
+3. **PyTorch & SentenceTransformers**: `sentence-transformers` installs PyTorch (~800MB–2GB depending on CUDA support). Model weights for `all-MiniLM-L6-v2` (~90MB) download automatically on first run and are warmed up in a background thread at server startup.
+4. **Groq API Key (Optional)**: If your MCP client supports sampling, Groq is **not** required for planning or report generation. It is only needed if you wish to transcribe YouTube videos that lack captions via Whisper fallback.
 
 ---
 
@@ -84,21 +66,24 @@ Create a `.env` file in the root directory:
 ```bash
 cp .env.example .env
 ```
-Fill in your API keys in `.env`:
+Configure your preferences in `.env`:
 ```env
-# Required for LLM planning, report writing, and Whisper fallback
+# Optional: Only needed for Whisper transcription fallback if sampling is supported
 GROQ_API_KEY=your_groq_api_key_here
 
 # Optional: Google Safe Browsing API Key
 GOOGLE_SAFE_BROWSING_API_KEY=
 
-# LLM Models
+# LLM Models (used as fallback when MCP client sampling is unavailable)
 PLANNER_MODEL=openai/gpt-oss-120b
 REPORT_MODEL=openai/gpt-oss-120b
 
-# Query Limits
+# Query Limits (defaults to 3 each to stay within client tool timeouts)
 NUM_YOUTUBE_QUERIES=3
 NUM_WEB_QUERIES=3
+
+# Time Budget in seconds before returning partial evidence (default: 120s)
+RUN_TIMEOUT_SECONDS=120
 ```
 
 ---
@@ -109,9 +94,9 @@ ProofPick exposes three primary tools over the Model Context Protocol:
 
 | Tool | Parameters | Description |
 | :--- | :--- | :--- |
-| `research_product` | `message: str`, `history: list[str] = None` | Runs the full pipeline: intent analysis, planning, web + YouTube RAG research, and returns a fully cited Markdown report. Returns clarifying questions if the prompt is ambiguous. |
-| `analyze_intent` | `message: str`, `history: list[str] = None` | Parses the user's intent into structured JSON (`category`, `budget`, `priorities`, `dealbreakers`, `clarifications`). |
-| `get_evidence` | `message: str`, `history: list[str] = None` | Gathers and returns the raw research evidence, extracted chunks, sources, and stats without generating a final report. |
+| `research_product` | `message: str`, `history: list[str] = None` | Runs the full pipeline: intent analysis, planning, web + YouTube RAG research, and returns a fully cited Markdown report. Returns clarifying questions if the prompt is ambiguous. Reports progress percentages to the client. |
+| `analyze_intent` | `message: str`, `history: list[str] = None` | Parses the user's intent into structured JSON (`category`, `budget`, `priorities`, `dealbreakers`, `clarifications`). Capped at 2 clarification rounds to prevent repeated prompts. |
+| `get_evidence` | `message: str`, `history: list[str] = None` | Gathers and returns the raw research evidence, extracted chunks, sources, and stats without generating a final report. Evidence is explicitly marked as untrusted third-party data. |
 
 ---
 
@@ -164,22 +149,15 @@ Add ProofPick to `~/.config/Claude/claude_desktop_config.json`:
 }
 ```
 
+> **Client Timeout Tip**: Deep research across multiple web pages and video transcripts can take 30–90 seconds. In your MCP client configuration, ensure tool call timeouts are set to at least 120 seconds.
+
 ---
 
-## Running Standalone in the Terminal
+## Testing
 
-You can test the pipeline directly in Python:
+Run the automated test suite (chunking unpunctuated text tests and sampling smoke tests):
 ```bash
-python -c "
-import asyncio
-from main import research_product
-
-async def run():
-    report = await research_product('phone for gaming under 20000 rupees')
-    print(report)
-
-asyncio.run(run())
-"
+python -m unittest discover tests
 ```
 
 ---

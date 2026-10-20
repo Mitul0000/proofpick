@@ -1,110 +1,134 @@
 import asyncio
+import contextvars
 import json
+import logging
 import re
-from typing import Any
 import sys
+from typing import Any
 from groq import Groq
 from pydantic import BaseModel
 from config.settings import Setting
 
 settings = Setting()
+logger = logging.getLogger("proofpick.llm")
+
 client = None
+
+# ContextVar storing a tuple of (FastMCP Context, active asyncio event loop)
+samplingContextVar: contextvars.ContextVar[tuple[Any, Any] | None] = contextvars.ContextVar(
+    "samplingContextVar", default=None
+)
 
 
 def getClient():
     global client
-    if client is None:
+    if client is None and settings.groq_api_key:
         client = Groq(api_key=settings.groq_api_key, timeout=settings.llm_timeout)
     return client
 
 
-# Global context reference set during active MCP tool calls
-samplingContext: Any = None
-
-
-def setSamplingContext(ctx: Any):
-    """Sets the active MCP FastMCP Context for the duration of the tool execution."""
-    global samplingContext
-    samplingContext = ctx
+def setSamplingContext(ctx: Any, loop: Any = None):
+    """Stores the active MCP FastMCP Context and event loop in a ContextVar."""
+    if loop is None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+    samplingContextVar.set((ctx, loop))
 
 
 def clearSamplingContext():
     """Clears the active MCP FastMCP Context."""
-    global samplingContext
-    samplingContext = None
+    samplingContextVar.set(None)
 
 
-def _cleanJsonMarkdown(rawText: str) -> str:
+def _extractJsonBlock(rawText: str) -> str:
+    """Extracts JSON from text, matching outermost { to } and stripping markdown fences."""
     cleaned = rawText.strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```[a-zA-Z]*\n?", "", cleaned)
-        cleaned = re.sub(r"\n?```$", "", cleaned)
-    return cleaned.strip()
+        cleaned = re.sub(r"\n?```$", "", cleaned).strip()
+
+    startIdx = cleaned.find("{")
+    endIdx = cleaned.rfind("}")
+    if startIdx != -1 and endIdx != -1 and endIdx > startIdx:
+        return cleaned[startIdx : endIdx + 1]
+    return cleaned
 
 
-async def _sampleFromCallerModel(systemPrompt: str, userPrompt: str, maxTokens: int = 4000) -> str:
-    """Uses MCP session sampling to ask the SAME model in which the MCP client is running."""
+def _sampleViaEventLoop(session: Any, loop: Any, systemPrompt: str, userPrompt: str, maxTokens: int = 4000) -> str:
+    """Dispatches create_message onto the server's main event loop using run_coroutine_threadsafe or direct call."""
     import mcp.types as types
-    session = getattr(samplingContext, "session", None)
-    if session is None:
-        raise RuntimeError("No active MCP session found for sampling")
 
-    result = await session.create_message(
-        messages=[
-            types.SamplingMessage(
-                role="user",
-                content=types.TextContent(type="text", text=userPrompt)
-            )
-        ],
-        system_prompt=systemPrompt,
-        max_tokens=maxTokens,
-    )
-    content = result.content
-    if hasattr(content, "text"):
-        return content.text
-    if isinstance(content, list) and len(content) > 0 and hasattr(content[0], "text"):
-        return content[0].text
-    return str(content)
+    async def _call():
+        result = await session.create_message(
+            messages=[
+                types.SamplingMessage(
+                    role="user",
+                    content=types.TextContent(type="text", text=userPrompt),
+                )
+            ],
+            system_prompt=systemPrompt,
+            max_tokens=maxTokens,
+        )
+        content = result.content
+        if hasattr(content, "text"):
+            return content.text
+        if isinstance(content, list) and len(content) > 0 and hasattr(content[0], "text"):
+            return content[0].text
+        return str(content)
+
+    if loop.is_running():
+        # Invoked from a worker thread (asyncio.to_thread)
+        future = asyncio.run_coroutine_threadsafe(_call(), loop)
+        return future.result(timeout=settings.llm_timeout)
+    else:
+        # Loop is not currently running (e.g. sync unit test thread)
+        return loop.run_until_complete(_call())
 
 
 def askJson(systemPrompt:str, userPrompt:str, schemaModel:type[BaseModel], model:str|None=None, temperature:float|None=None):
-    # If an MCP session sampling context is available, ask the host model running the MCP
-    if samplingContext is not None:
-        try:
+    contextData = samplingContextVar.get()
+
+    # 1. Try MCP Sampling if client session is active
+    if contextData is not None:
+        ctx, loop = contextData
+        session = getattr(ctx, "session", None)
+        if session is not None and loop is not None:
             promptWithSchema = (
                 f"{userPrompt}\n\nIMPORTANT: Respond ONLY with a valid JSON object matching this schema:\n"
                 f"{json.dumps(schemaModel.model_json_schema())}"
             )
-            # Run async sampling call in current event loop or new loop
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
+            currentPrompt = promptWithSchema
+            for attempt in range(settings.llm_max_retries + 1):
+                try:
+                    logger.info(f"Attempting MCP sampling via caller model (attempt {attempt + 1})...")
+                    rawText = _sampleViaEventLoop(session, loop, systemPrompt, currentPrompt)
+                    jsonCandidate = _extractJsonBlock(rawText)
+                    parsed = schemaModel.model_validate_json(jsonCandidate)
+                    logger.info("MCP sampling succeeded and validated schema.")
+                    return parsed
+                except Exception as e:
+                    logger.warning(f"MCP sampling attempt {attempt + 1} validation error: {e}")
+                    currentPrompt = (
+                        f"{promptWithSchema}\n\nPrevious response failed validation with error: {e}. "
+                        "Please fix and output ONLY the raw JSON object from { to }."
+                    )
+            logger.warning("MCP sampling retries exhausted, attempting Groq fallback if configured...")
 
-            if loop and loop.is_running():
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    rawText = executor.submit(
-                        asyncio.run,
-                        _sampleFromCallerModel(systemPrompt, promptWithSchema)
-                    ).result()
-            else:
-                rawText = asyncio.run(_sampleFromCallerModel(systemPrompt, promptWithSchema))
-
-            cleaned = _cleanJsonMarkdown(rawText)
-            return schemaModel.model_validate_json(cleaned)
-        except Exception as e:
-            print(f"Sampling from caller model failed ({e}), falling back to client...", file=sys.stderr)
-
+    # 2. Fallback to Groq API
     c = getClient()
+    if c is None:
+        raise RuntimeError("No LLM available: MCP sampling failed/unsupported and GROQ_API_KEY is not configured.")
+
     llmModel = model or settings.planner_model
     temp = temperature if temperature is not None else settings.planner_temperature
-
     currentPrompt = userPrompt
     lastError = None
 
     for attempt in range(settings.llm_max_retries + 1):
         try:
+            logger.info(f"Calling Groq LLM ({llmModel}) attempt {attempt + 1}...")
             response = c.chat.completions.create(
                 model=llmModel,
                 temperature=temp,
@@ -114,43 +138,45 @@ def askJson(systemPrompt:str, userPrompt:str, schemaModel:type[BaseModel], model
                     {"role": "user", "content": currentPrompt},
                 ],
             )
-            rawText = response.choices[0].message.content
-            return schemaModel.model_validate_json(rawText)
+            rawText = response.choices[0].message.content or "{}"
+            jsonCandidate = _extractJsonBlock(rawText)
+            parsed = schemaModel.model_validate_json(jsonCandidate)
+            logger.info(f"Groq LLM ({llmModel}) answered successfully.")
+            return parsed
         except Exception as e:
             lastError = e
-            print(f"askJson attempt {attempt + 1} failed: {e}", file=sys.stderr)
-            currentPrompt = f"{userPrompt}\n\nPrevious attempt failed with error: {e}. Please fix and return ONLY valid JSON matching the schema."
+            logger.warning(f"Groq askJson attempt {attempt + 1} failed: {e}")
+            currentPrompt = f"{userPrompt}\n\nPrevious attempt failed with error: {e}. Return ONLY valid JSON matching the schema."
 
     raise ValueError(f"Failed to get valid JSON from LLM after {settings.llm_max_retries + 1} attempts: {lastError}")
 
 
 def askText(systemPrompt:str, userPrompt:str, model:str|None=None, temperature:float|None=None, max_tokens:int|None=None)->str:
-    if samplingContext is not None:
-        try:
+    contextData = samplingContextVar.get()
+
+    if contextData is not None:
+        ctx, loop = contextData
+        session = getattr(ctx, "session", None)
+        if session is not None and loop is not None:
             try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            if loop and loop.is_running():
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    rawText = executor.submit(
-                        asyncio.run,
-                        _sampleFromCallerModel(systemPrompt, userPrompt, maxTokens=max_tokens or settings.report_max_tokens)
-                    ).result()
-            else:
-                rawText = asyncio.run(_sampleFromCallerModel(systemPrompt, userPrompt, maxTokens=max_tokens or settings.report_max_tokens))
-
-            return rawText or ""
-        except Exception as e:
-            print(f"Sampling from caller model failed ({e}), falling back to client...", file=sys.stderr)
+                logger.info("Calling askText via MCP sampling...")
+                text = _sampleViaEventLoop(
+                    session, loop, systemPrompt, userPrompt, maxTokens=max_tokens or settings.report_max_tokens
+                )
+                logger.info("MCP sampling askText succeeded.")
+                return text or ""
+            except Exception as e:
+                logger.warning(f"MCP sampling askText failed ({e}), falling back to Groq...")
 
     c = getClient()
+    if c is None:
+        raise RuntimeError("No LLM available: MCP sampling failed and GROQ_API_KEY is not configured.")
+
     llmModel = model or settings.report_model
     temp = temperature if temperature is not None else settings.report_temperature
     maxTokens = max_tokens or settings.report_max_tokens
 
+    logger.info(f"Calling Groq askText ({llmModel})...")
     response = c.chat.completions.create(
         model=llmModel,
         temperature=temp,
@@ -160,4 +186,5 @@ def askText(systemPrompt:str, userPrompt:str, model:str|None=None, temperature:f
             {"role": "user", "content": userPrompt},
         ],
     )
+    logger.info("Groq askText completed.")
     return response.choices[0].message.content or ""

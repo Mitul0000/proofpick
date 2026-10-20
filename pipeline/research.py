@@ -1,6 +1,8 @@
+import logging
 import sys
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
+from numpy.linalg import norm
 from config.settings import Setting
 from core.Rag.embedding import embeddings
 from core.Rag.pipeline import buildDocument, getRelevantChunks, rankWithSourceCap
@@ -9,9 +11,9 @@ from models.search import SearchQuery, SourceSearch
 from models.search_result import GoogleSearchResult, YoutubeSearchResult
 from services.web_service import WebExtractor
 from services.youtube_service import YoutubeSearch
-from numpy.linalg import norm
 
 settings = Setting()
+logger = logging.getLogger("proofpick.research")
 
 
 def youtubeBranch(source:SourceSearch):
@@ -172,13 +174,31 @@ def webBranch(source:SourceSearch):
     return results, statsList, meta
 
 
-def runResearch(plan:SearchQuery)->EvidencePack:
+def runResearch(plan:SearchQuery, progressCallback=None)->EvidencePack:
+    if progressCallback:
+        progressCallback(1, 4, "Starting parallel YouTube & Web research...")
+
+    ytResults, ytStats, ytMeta = [], [], {}
+    webResults, webStats, webMeta = [], [], {}
+
     with ThreadPoolExecutor(max_workers=2) as executor:
         futureYt = executor.submit(youtubeBranch, plan.youtube_search)
         futureWeb = executor.submit(webBranch, plan.google_search)
 
-        ytResults, ytStats, ytMeta = futureYt.result()
-        webResults, webStats, webMeta = futureWeb.result()
+        try:
+            ytResults, ytStats, ytMeta = futureYt.result()
+        except Exception as e:
+            logger.error(f"YouTube branch failed: {e}")
+            ytMeta = {"videos_found": 0, "videos_read": 0, "error": str(e)}
+
+        try:
+            webResults, webStats, webMeta = futureWeb.result()
+        except Exception as e:
+            logger.error(f"Web branch failed: {e}")
+            webMeta = {"articles_found": 0, "articles_read": 0, "error": str(e)}
+
+    if progressCallback:
+        progressCallback(2, 4, "Merging and deduplicating extracted evidence...")
 
     mergedMap = {}
     for item in ytResults + webResults:
@@ -188,6 +208,8 @@ def runResearch(plan:SearchQuery)->EvidencePack:
 
     pool = list(mergedMap.values())
 
+    if progressCallback:
+        progressCallback(3, 4, f"Running master semantic reranking on {len(pool)} chunks...")
 
     if pool:
         masterVector = embeddings(plan.master_query)[0]
@@ -213,7 +235,7 @@ def runResearch(plan:SearchQuery)->EvidencePack:
             maxPerSource=settings.max_chunks_per_source_in_master,
         )
     else:
-        print("Continues to work without the final chunks")
+        logger.warning("No pool chunks found during research.")
         finalChunks = []
 
     sourceMap = {}
@@ -264,6 +286,9 @@ def runResearch(plan:SearchQuery)->EvidencePack:
         chunks_final=len(finalChunks),
         query_stats=ytStats + webStats,
     )
+
+    if progressCallback:
+        progressCallback(4, 4, f"Research complete. Selected {len(finalChunks)} final evidence chunks.")
 
     return EvidencePack(
         master_query=plan.master_query,

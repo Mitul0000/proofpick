@@ -1,3 +1,4 @@
+import logging
 import sys
 from datetime import date
 from config.settings import Setting
@@ -6,6 +7,7 @@ from models.intent import UserIntent
 from models.search import SearchQuery
 
 settings = Setting()
+logger = logging.getLogger("proofpick.planner")
 
 INTENT_SYSTEM_PROMPT = """You are an expert product research intent analyzer.
 Your job is to analyze the user's shopping/product request and conversation history, and extract their structured intent.
@@ -39,7 +41,7 @@ Return a JSON object conforming exactly to this shape:
 }
 
 RULES:
-1. Put `clarification.is_ambiguous=true` with specific `missing_info` questions when the conversation is not enough to understand the any from here [budget,product category,use case, Brand preference if any] .  Also adds the relevent missing_info.
+1. Put `clarification.is_ambiguous=true` with specific `missing_info` questions when the conversation is not enough to understand any critical requirement (budget, product category, primary use case).
 2. Otherwise, infer sensibly from context and set `clarification.is_ambiguous=false` or null.
 3. `priority_attributes` maps specific product attributes to weights 0.0 to 1.0 based on what matters most to the user.
 """
@@ -63,11 +65,22 @@ Return a JSON object with this shape:
 RULES:
 1. Demand EXACTLY {num_youtube} youtube query strings and {num_web} web query strings.
 2. The lists `query` and `chunk_query` must be parallel and equal in length for both google_search and youtube_search.
-3. The chunk_query should be written in such a way that it should be relevent to the correspoding query. Like if there is review product related query then the chunk_query has be like what importent we are trying to gather from here. So that it helps in relevent data extraction from the specific query.
-4. Search strings: short, natural, exploring different angles (best-of, honest review, long-term review, vs comparisons, problems/complaints, specific attributes from priorities, budget/location when known, Details). Include the current year ({current_year}) in review-style strings.
-5. chunk_query[i]: ONE descriptive sentence saying what facts to pull from every document found by query[i] (e.g. "battery life, charging speed and heating during gaming on the Poco X6").
-6. master_query: one sentence capturing the user's full intent and priorities, used to pick the final evidence.
+3. Search strings: short, natural, exploring different angles (best-of, honest review, long-term review, vs comparisons, problems/complaints, specific attributes from priorities, budget/location when known). Include the current year ({current_year}) in review-style strings.
+4. chunk_query[i]: ONE descriptive sentence saying what facts to pull from every document found by query[i] (e.g. "battery life, charging speed and heating during gaming on the Poco X6").
+5. master_query: one sentence capturing the user's full intent and priorities, used to pick the final evidence.
 """
+
+
+def _countPriorClarificationRounds(history: list[str] | None) -> int:
+    """Counts how many times clarification questions have already been asked in the conversation."""
+    if not history:
+        return 0
+    count = 0
+    for h in history:
+        hLower = h.lower()
+        if "clarification before researching" in hLower or "what is your budget" in hLower or "could you specify your intended use case" in hLower:
+            count += 1
+    return count
 
 
 def analyzeIntent(userMessage:str, history:list[str]|None=None)->UserIntent:
@@ -76,13 +89,23 @@ def analyzeIntent(userMessage:str, history:list[str]|None=None)->UserIntent:
         historyStr = "\n".join(history)
         userPrompt = f"Conversation history:\n{historyStr}\n\nUser message: {userMessage}"
 
-    return askJson(
+    intent = askJson(
         systemPrompt=INTENT_SYSTEM_PROMPT,
         userPrompt=userPrompt,
         schemaModel=UserIntent,
         model=settings.planner_model,
         temperature=settings.planner_temperature,
     )
+
+    # Cap clarification rounds: if history already has 2 or more clarification rounds, proceed with sensible defaults
+    if intent.clarification and intent.clarification.is_ambiguous:
+        rounds = _countPriorClarificationRounds(history)
+        if rounds >= 2:
+            logger.info("Clarification round cap reached (>= 2). Overriding ambiguity to proceed with sensible defaults.")
+            intent.clarification.is_ambiguous = False
+            intent.clarification.missing_info = []
+
+    return intent
 
 
 def buildSearchPlan(intent:UserIntent)->SearchQuery:
@@ -106,8 +129,8 @@ def buildSearchPlan(intent:UserIntent)->SearchQuery:
     ytCount = len(plan.youtube_search.query)
     webCount = len(plan.google_search.query)
     if ytCount != settings.num_youtube_queries:
-        print(f"Warning: Expected {settings.num_youtube_queries} YouTube queries, got {ytCount}", file=sys.stderr)
+        logger.warning(f"Expected {settings.num_youtube_queries} YouTube queries, got {ytCount}")
     if webCount != settings.num_web_queries:
-        print(f"Warning: Expected {settings.num_web_queries} Web queries, got {webCount}", file=sys.stderr)
+        logger.warning(f"Expected {settings.num_web_queries} Web queries, got {webCount}")
 
     return plan

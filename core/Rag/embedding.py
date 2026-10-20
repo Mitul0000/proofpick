@@ -1,15 +1,24 @@
+import logging
+import threading
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from config.settings import Setting
 
 settings = Setting()
+logger = logging.getLogger("proofpick.embedding")
+
 model = None
+modelLock = threading.Lock()
 
 
 def getModel():
     global model
     if model is None:
-        model = SentenceTransformer(settings.embedding_model)
+        with modelLock:
+            if model is None:
+                logger.info(f"Loading embedding model: {settings.embedding_model}...")
+                model = SentenceTransformer(settings.embedding_model)
+                logger.info("Embedding model loaded successfully.")
     return model
 
 

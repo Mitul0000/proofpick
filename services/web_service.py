@@ -1,56 +1,66 @@
-from config.settings import Setting
-from ddgs import DDGS
-from bs4 import BeautifulSoup
-from concurrent.futures import ThreadPoolExecutor
-from models.cache import getCache, setCache
-from urllib.parse import urlparse
-import requests
+import ipaddress
+import logging
 import re
+import socket
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse
+from bs4 import BeautifulSoup
+from ddgs import DDGS
+import requests
+from config.settings import Setting
+from models.cache import getCache, setCache
 
 settings = Setting()
+logger = logging.getLogger("proofpick.web")
+
+
+def isPrivateOrLoopbackHost(host: str) -> bool:
+    """Checks if a hostname resolves to private, loopback, or reserved IP ranges (SSRF prevention)."""
+    if not host:
+        return True
+    hostLower = host.lower()
+    if hostLower in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return True
+    try:
+        addrInfo = socket.getaddrinfo(host, None)
+        for family, _, _, _, sockaddr in addrInfo:
+            ipStr = sockaddr[0]
+            ipObj = ipaddress.ip_address(ipStr)
+            if ipObj.is_private or ipObj.is_loopback or ipObj.is_reserved or ipObj.is_link_local:
+                return True
+    except Exception:
+        return True
+    return False
 
 
 class WebExtractor:
-
-    def __init__(self,search_list:list[str]):
+    def __init__(self, search_list: list[str]):
         self.search_string = search_list
 
     def search_on_web(self):
         search_results = []
-
         for query in self.search_string:
             cache_key = f"web_search:{query}:{settings.max_google_result}"
             cached = getCache(cache_key)
-            if cached is not None:
-                search_results.append({
-                    "query": query,
-                    "result": cached,
-                })
+            if cached is not None and len(cached) > 0:
+                logger.info(f"Loaded {len(cached)} cached web results for '{query}'")
+                search_results.append({"query": query, "result": cached})
                 continue
 
             try:
+                logger.info(f"Searching web for '{query}'...")
                 results = list(DDGS().text(query, max_results=settings.max_google_result))
-                setCache(cache_key, results)
-                search_results.append({
-                    "query": query,
-                    "result": results,
-                })
+                if results:
+                    setCache(cache_key, results)
+                search_results.append({"query": query, "result": results})
             except Exception as e:
-                print(f"Web search error for '{query}': {e}", file=sys.stderr)
-                search_results.append({
-                    "query": query,
-                    "result": [],
-                })
+                logger.warning(f"Web search error for '{query}': {e}")
+                search_results.append({"query": query, "result": []})
 
         return search_results
 
-    def webcontent_filter(self,search_results:list[dict[str,dict | str]]):
-
-        # Here we can block the link by the domain and if the link is of any file like pdf and all.
-        # Then we can block that extension also. Also we filter out the duplicate links.
-        # This also helps to filter out the threats url by the google safe search. This will word if is it configured in setting and api is provided.
-
+    def webcontent_filter(self, search_results: list[dict[str, dict | str]]):
         for each_query_dict in search_results:
             raw_results = each_query_dict.get("result", [])
             filtered_results = []
@@ -64,7 +74,11 @@ class WebExtractor:
                 parsed = urlparse(href)
                 host = (parsed.hostname or "").lower()
 
-                # check blocked domains
+                # Block private/loopback SSRF attempts early
+                if isPrivateOrLoopbackHost(host):
+                    continue
+
+                # Block social & unwanted domains
                 is_blocked_domain = False
                 for blocked in settings.blocked_domains:
                     blocked_clean = blocked.lower().strip()
@@ -74,83 +88,94 @@ class WebExtractor:
                 if is_blocked_domain:
                     continue
 
+                # Block file extensions
                 path_lower = parsed.path.lower()
-                is_blocked_ext = False
-                for ext in settings.blocked_file_extensions:
-                    if path_lower.endswith(ext.lower()):
-                        is_blocked_ext = True
-                        break
-                if is_blocked_ext:
+                if any(path_lower.endswith(ext.lower()) for ext in settings.blocked_file_extensions):
                     continue
 
                 if href in seen_urls:
                     continue
                 seen_urls.add(href)
-
                 filtered_results.append(item)
-
 
             if settings.use_safe_browsing and settings.google_safe_browsing_api_key and filtered_results:
                 try:
                     threat_urls = self.check_safe_browsing([r["href"] for r in filtered_results])
                     filtered_results = [r for r in filtered_results if r["href"] not in threat_urls]
                 except Exception as e:
-                    print(f"Safe browsing check failed: {e}", file=sys.stderr)
+                    logger.warning(f"Safe browsing check failed: {e}")
 
             each_query_dict["result"] = filtered_results
 
         return search_results
 
-    def check_safe_browsing(self,urls:list[str])->set[str]:
+    def check_safe_browsing(self, urls: list[str]) -> set[str]:
         api_url = f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={settings.google_safe_browsing_api_key}"
         payload = {
-            "client": {
-                "clientId": "proofpick",
-                "clientVersion": "1.0",
-            },
+            "client": {"clientId": "proofpick", "clientVersion": "1.0"},
             "threatInfo": {
                 "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE", "POTENTIALLY_HARMFUL_APPLICATION"],
                 "platformTypes": ["ANY_PLATFORM"],
                 "threatEntryTypes": ["URL"],
                 "threatEntries": [{"url": u} for u in urls],
-            }
+            },
         }
         res = requests.post(api_url, json=payload, timeout=10)
         threat_urls = set()
         if res.status_code == 200:
             data = res.json()
-            matches = data.get("matches", [])
-            for m in matches:
+            for m in data.get("matches", []):
                 u = m.get("threat", {}).get("url")
                 if u:
                     threat_urls.add(u)
         return threat_urls
 
-    def webpage_content_extractor(self,each_result:dict):
+    def webpage_content_extractor(self, each_result: dict):
         url = each_result.get("href")
         if not url:
             return each_result
 
         cache_key = f"web_page:{url}"
         cached = getCache(cache_key)
-        if cached is not None:
-            if cached.get("text"):
-                each_result["web content"] = cached["text"]
-                each_result["domain"] = cached["domain"]
+        if cached is not None and cached.get("text"):
+            each_result["web content"] = cached["text"]
+            each_result["domain"] = cached["domain"]
+            return each_result
+
+        parsed = urlparse(url)
+        host = parsed.netloc or ""
+        domain = host[4:] if host.startswith("www.") else host
+
+        if isPrivateOrLoopbackHost(domain):
             return each_result
 
         try:
-            parsed = urlparse(url)
-            host = parsed.netloc or ""
-            domain = host[4:] if host.startswith("www.") else host
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+            }
+            # Stream body with max byte cap and check redirect destinations
+            with requests.get(
+                url,
+                timeout=settings.web_fetch_timeout,
+                headers=headers,
+                stream=True,
+                allow_redirects=True,
+            ) as response:
+                finalHost = urlparse(response.url).hostname or ""
+                if isPrivateOrLoopbackHost(finalHost):
+                    return each_result
 
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"}
-            response = requests.get(url, timeout=settings.web_fetch_timeout, headers=headers)
-            content_type = response.headers.get("Content-Type", "").lower()
-            if response.status_code != 200 or "text/html" not in content_type:
-                return each_result
+                content_type = response.headers.get("Content-Type", "").lower()
+                if response.status_code != 200 or "text/html" not in content_type:
+                    return each_result
 
-            soup = BeautifulSoup(response.content, "html.parser")
+                bodyBytes = b""
+                for chunk in response.iter_content(chunk_size=8192):
+                    bodyBytes += chunk
+                    if len(bodyBytes) >= settings.web_max_download_bytes:
+                        break
+
+            soup = BeautifulSoup(bodyBytes, "html.parser")
             for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form", "noscript"]):
                 tag.decompose()
 
@@ -163,18 +188,18 @@ class WebExtractor:
             text = " ".join(extracted_parts)
             text = re.sub(r"\s+", " ", text).strip()
             if len(text) > settings.max_web_content_chars:
-                text = text[:settings.max_web_content_chars]
+                text = text[: settings.max_web_content_chars]
 
             if len(text) >= settings.min_web_content_chars:
                 each_result["web content"] = text
                 each_result["domain"] = domain
                 setCache(cache_key, {"text": text, "domain": domain})
         except Exception as e:
-            print(f"Web extraction failed for {url}: {e}", file=sys.stderr)
+            logger.debug(f"Web extraction failed for {url}: {e}")
 
         return each_result
 
-    def get_web_content(self,search_results:list[dict[str,dict | str]]):
+    def get_web_content(self, search_results: list[dict[str, dict | str]]):
         unique_urls = set()
         for query_group in search_results:
             for item in query_group.get("result", []):
@@ -205,14 +230,3 @@ class WebExtractor:
             query_group["result"] = valid_results
 
         return search_results
-
-
-# if __name__=="__main__":
-#     extractor = WebExtractor(search_list=["iphone 16", "iphone 16 review"])
-#     raw_search_data = extractor.search_on_web()
-#     complete_web_data = extractor.get_web_content(raw_search_data)
-#     for query_group in complete_web_data:
-#         print(f"\nQuery: {query_group['query']}")
-#         for result in query_group.get("result", []):
-#             print(f"Title: {result.get('title')}")
-#             print(f"Content Snippet: {str(result.get('web content'))[:150]}...")

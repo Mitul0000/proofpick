@@ -30,11 +30,23 @@ def getCache(key:str):
     if row is None:
         return None
 
-    return json.loads(row[0])
+    value_json, created_at = row
+    if created_at is not None:
+        age_in_hours = (time.time() - float(created_at)) / 3600.0
+        if age_in_hours > settings.cache_ttl_hours:
+            return None
+
+    try:
+        return json.loads(value_json)
+    except Exception:
+        return None
 
 
 def setCache(key:str, value):
+    # never cache None or empty collections (avoid caching rate-limited/failed responses)
     if value is None:
+        return
+    if isinstance(value, (list, dict, str)) and len(value) == 0:
         return
 
     connection = getConnection()

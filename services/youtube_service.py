@@ -1,42 +1,44 @@
-from yt_dlp import YoutubeDL
-from config.settings import Setting
-from concurrent.futures import ThreadPoolExecutor
-from models.cache import getCache, setCache
-import youtube_transcript_api
-from groq import Groq
 import logging
 import os
 import re
-import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from yt_dlp import YoutubeDL
+import youtube_transcript_api
+from groq import Groq
+from config.settings import Setting
+from models.cache import getCache, setCache
 
 setting = Setting()
 logger = logging.getLogger("proofpick.youtube")
 
+# Limit concurrent Whisper audio conversion / API calls to 2
+whisperSemaphore = threading.Semaphore(2)
 
-class YoutubeSearch: 
 
-    def __init__(self,search_list:list[str]):
+class YoutubeSearch:
+    def __init__(self, search_list: list[str]):
         self.search_string = search_list
 
-    def search_youtube(self)->list[dict[str,str]]:
-        ydl_opts = { 
-            'quiet': True,
-            'extract_flat': True,
-            'skip_download': True
+    def search_youtube(self) -> list[dict[str, str]]:
+        ydl_opts = {
+            "quiet": True,
+            "extract_flat": True,
+            "skip_download": True,
         }
 
         links = []
-
         for string in self.search_string:
-            search_url = f"ytsearch{setting.max_youtube_results}:{string}"
-            cached_data = getCache(search_url)
-            if cached_data is not None:
-                logger.info(f"Loaded {len(cached_data)} cached YouTube results for query: '{string}'")
+            cache_key = f"yt_search:{string}:{setting.max_youtube_results}"
+            cached_data = getCache(cache_key)
+            if cached_data is not None and len(cached_data) > 0:
+                logger.info(f"Loaded {len(cached_data)} cached YouTube results for '{string}'")
                 links.extend(cached_data)
                 continue
 
+            search_url = f"ytsearch{setting.max_youtube_results}:{string}"
             query_links = []
-            logger.info(f"Searching YouTube for query: '{string}' (max {setting.max_youtube_results} results)")
+            logger.info(f"Searching YouTube for query: '{string}' (max {setting.max_youtube_results})")
             try:
                 with YoutubeDL(ydl_opts) as ydl:
                     result = ydl.extract_info(search_url, download=False)
@@ -45,11 +47,11 @@ class YoutubeSearch:
                         views = entry.get("view_count")
 
                         if (
-                            duration is None or 
-                            duration < setting.min_duration or 
-                            duration > setting.max_duration or
-                            views is None or 
-                            views < setting.min_youtube_views
+                            duration is None
+                            or duration < setting.min_duration
+                            or duration > setting.max_duration
+                            or views is None
+                            or views < setting.min_youtube_views
                         ):
                             continue
 
@@ -64,7 +66,8 @@ class YoutubeSearch:
                             "channel_link": entry.get("channel_url") or "",
                         })
                 logger.info(f"Found {len(query_links)} eligible videos for query: '{string}'")
-                setCache(search_url, query_links)
+                if query_links:
+                    setCache(cache_key, query_links)
                 links.extend(query_links)
             except Exception as e:
                 logger.error(f"YouTube search error for '{string}': {e}")
@@ -72,7 +75,7 @@ class YoutubeSearch:
 
         return links
 
-    def extract_transcript_by_youtube_api(self,url:str):
+    def extract_transcript_by_youtube_api(self, url: str):
         video_id_match = re.search(r"v=([^&]+)", url)
         if not video_id_match:
             return (None, "")
@@ -103,17 +106,18 @@ class YoutubeSearch:
             text = None
 
         if not text and setting.use_whisper_fallback and setting.groq_api_key:
-            logger.info(f"Starting Whisper audio fallback for video {video_id}...")
-            text = self.extract_transcript_by_api_call(url)
-            if text:
-                source = "whisper"
-                logger.info(f"Whisper transcribed {len(text)} characters for video {video_id}")
+            with whisperSemaphore:
+                logger.info(f"Starting Whisper audio fallback for video {video_id}...")
+                text = self.extract_transcript_by_api_call(url)
+                if text:
+                    source = "whisper"
+                    logger.info(f"Whisper transcribed {len(text)} characters for video {video_id}")
 
         if text:
             setCache(cache_key, {"transcript": text, "transcript_source": source})
         return (text, source)
 
-    def extract_transcript_by_api_call(self,url:str):
+    def extract_transcript_by_api_call(self, url: str):
         mp3_file = None
         try:
             mp3_file = self.download_and_convert_to_mp3(url)
@@ -134,13 +138,13 @@ class YoutubeSearch:
                     transcription = client.audio.translations.create(
                         file=file,
                         model=setting.whisper_model,
-                        response_format="verbose_json"
+                        response_format="verbose_json",
                     )
                 else:
                     transcription = client.audio.transcriptions.create(
                         file=file,
                         model=setting.whisper_model,
-                        response_format="verbose_json"
+                        response_format="verbose_json",
                     )
 
             logger.info(f"Groq Whisper transcription finished for {url}")
@@ -156,7 +160,7 @@ class YoutubeSearch:
                 except Exception as e:
                     logger.warning(f"Failed to remove audio file {mp3_file}: {e}")
 
-    def download_and_convert_to_mp3(self,url:str):
+    def download_and_convert_to_mp3(self, url: str):
         video_id_match = re.search(r"v=([^&]+)", url)
         video_id = video_id_match.group(1) if video_id_match else "audio"
 
@@ -166,15 +170,20 @@ class YoutubeSearch:
         output_template = os.path.join(audio_dir, f"{video_id}.%(ext)s")
         logger.info(f"Downloading audio track from YouTube: {url}")
 
+        # Encode mono at 32 kbps to allow up to 90 minutes of speech within the 24 MB limit
         ydl_opts = {
             "format": "bestaudio/best",
             "outtmpl": output_template,
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }],
-            "nocheckcertificate": True,
+            "postprocessors": [
+                {
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "32",
+                }
+            ],
+            "postprocessor_args": [
+                "-ac", "1",  # mono audio for speech recognition efficiency
+            ],
             "quiet": True,
         }
 
@@ -183,14 +192,14 @@ class YoutubeSearch:
                 ydl.extract_info(url, download=True)
                 mp3_path = os.path.join(audio_dir, f"{video_id}.mp3")
                 if os.path.exists(mp3_path):
-                    logger.info(f"Audio converted to MP3: {mp3_path}")
+                    logger.info(f"Audio converted to mono 32kbps MP3: {mp3_path}")
                     return mp3_path
                 return None
         except Exception as e:
             logger.error(f"Audio download failed for {url}: {e}")
             return None
 
-    def get_transcript(self,links:list[dict[str,str]]):
+    def get_transcript(self, links: list[dict[str, str]]):
         unique_urls = list({link.get("link") for link in links if link.get("link")})
         url_transcripts = {}
 
@@ -198,7 +207,7 @@ class YoutubeSearch:
             try:
                 return (url, self.extract_transcript_by_youtube_api(url))
             except Exception as e:
-                print(f"Failed extracting transcript for {url}: {e}", file=sys.stderr)
+                logger.error(f"Failed extracting transcript for {url}: {e}")
                 return (url, (None, ""))
 
         with ThreadPoolExecutor(max_workers=setting.youtube_workers) as executor:
@@ -212,13 +221,3 @@ class YoutubeSearch:
             link["transcript_source"] = transcript_source
 
         return links
-
-
-# for testing only
-# if __name__ =='__main__':
-#     yt = YoutubeSearch(["iphone 16 review"])
-#     print("Extracting the link from youtube")
-#     links_extracted = yt.search_youtube()
-#     print(f"{len(links_extracted)} links extracted sucessfully ")
-#     video_details_with_transcription = yt.get_transcript(links_extracted)
-#     print(f"video details :- {video_details_with_transcription}")
