@@ -26,6 +26,8 @@ class YoutubeSearch:
             "extract_flat": True,
             "skip_download": True,
         }
+        if setting.youtube_cookies_file and os.path.exists(setting.youtube_cookies_file):
+            ydl_opts["cookiefile"] = setting.youtube_cookies_file
 
         links = []
         for string in self.search_string:
@@ -186,6 +188,8 @@ class YoutubeSearch:
             ],
             "quiet": True,
         }
+        if setting.youtube_cookies_file and os.path.exists(setting.youtube_cookies_file):
+            ydl_opts["cookiefile"] = setting.youtube_cookies_file
 
         try:
             with YoutubeDL(ydl_opts) as ydl:

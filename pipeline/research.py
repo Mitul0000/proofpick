@@ -48,8 +48,16 @@ def youtubeBranch(source:SourceSearch, deadline: float | None = None):
             logger.warning("YouTube document building halted: deadline exceeded.")
             break
         transcript = (video.get("transcript") or "").strip()
+        title = video.get("title") or "Unknown Title"
+        src = video.get("transcript_source") or "none"
         if not transcript:
+            logger.info(f"[Extracted YouTube] (No transcript) Title: '{title}' | URL: {url} | Source: {src}")
             continue
+        snippet = transcript[:150].replace("\n", " ") + ("..." if len(transcript) > 150 else "")
+        logger.info(
+            f"[Extracted YouTube] Title: '{title}' | URL: {url} | "
+            f"Source: {src} | Chars: {len(transcript)} | Snippet: \"{snippet}\""
+        )
         documents[url] = buildDocument(transcript)
 
     results = []
@@ -139,8 +147,16 @@ def webBranch(source:SourceSearch, deadline: float | None = None):
             logger.warning("Web document building halted: deadline exceeded.")
             break
         content = (page.get("web content") or "").strip()
+        title = page.get("title") or "Unknown Title"
+        domain = page.get("domain") or "unknown"
         if not content:
+            logger.info(f"[Extracted Web] (No content) Title: '{title}' | Domain: {domain} | URL: {url}")
             continue
+        snippet = content[:150].replace("\n", " ") + ("..." if len(content) > 150 else "")
+        logger.info(
+            f"[Extracted Web] Title: '{title}' | Domain: {domain} | URL: {url} | "
+            f"Chars: {len(content)} | Snippet: \"{snippet}\""
+        )
         documents[url] = buildDocument(content)
 
     results = []
@@ -322,6 +338,27 @@ def runResearch(plan:SearchQuery, progressCallback=None, deadline: float | None 
         chunks_final=len(finalChunks),
         query_stats=ytStats + webStats,
     )
+
+    logger.info(
+        f"Research summary: {stats.videos_found} videos found ({stats.videos_read} read), "
+        f"{stats.articles_found} articles found ({stats.articles_read} read). "
+        f"{stats.chunks_before_master} total chunks -> {stats.chunks_final} final chunks selected across {len(sourcesList)} sources."
+    )
+
+    logger.info("=== INDEXED RESEARCH SOURCES ===")
+    for s in sourcesList:
+        logger.info(
+            f"[{s.source_id}] ({s.platform}) Title: '{s.title}' | Author: {s.author} | Views: {s.views} | "
+            f"Chunks Used: {s.chunks_used} | Score: {s.best_score:.3f} | URL: {s.url}"
+        )
+
+    logger.info(f"=== FINAL EVIDENCE CHUNKS ({len(finalChunks)}) ===")
+    for idx, c in enumerate(finalChunks, 1):
+        sId = sourceMap.get(c.url, {}).get("source_id", "S?")
+        cleanText = c.chunk_text.replace("\n", " ")
+        logger.info(
+            f"Chunk #{idx} [{c.platform}] [Source: {c.url}] [Score: {c.master_match_score:.3f}]: \"{cleanText}\""
+        )
 
     if progressCallback:
         progressCallback(4, 4, f"Research complete. Selected {len(finalChunks)} final evidence chunks.")

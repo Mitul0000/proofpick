@@ -16,7 +16,7 @@ class Setting(BaseSettings):
     google_safe_browsing_api_key: str = ""
 
     # YouTube
-    max_youtube_results: int = 5
+    max_youtube_results: int = 3
     min_youtube_views: int = 5000
     min_duration: int = 180                # 3 minutes
     max_duration: int = 5400               # 90 minutes
@@ -26,6 +26,7 @@ class Setting(BaseSettings):
     whisper_model: str = "whisper-large-v3"
     whisper_max_file_mb: int = 24
     audio_dir: str = str(BASE_DIR / "audio")
+    youtube_cookies_file: str = str(BASE_DIR / "cookies.txt")
 
     # Web
     max_google_result: int = 10
@@ -76,6 +77,6 @@ class Setting(BaseSettings):
     log_file: str = str(BASE_DIR / "proofpick.log")
 
     # Pipeline & Time Budget
-    run_timeout_seconds: int = 120          # total budget before returning partial evidence
+    run_timeout_seconds: int | None = None  # None = no time limit on research
     cache_dir: str = str(BASE_DIR / "cache")
     cache_ttl_hours: int = 72

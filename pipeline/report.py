@@ -222,4 +222,5 @@ def buildReport(intent:UserIntent, evidencePack:EvidencePack)->str:
         sourcesLines.append(f"- [{s.source_id}] {s.title} - {s.author} - {s.views} views - {s.url}")
 
     markdown += "\n".join(sourcesLines)
+    logger.info("=== FINAL GENERATED REPORT ===\n" + markdown)
     return markdown
